@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { pool } from '../config/db.js';
 import { getBusinessConfig, updateBusinessConfig } from '../config/business.js';
 import { getFullChatHistory, saveMessage, chatEvents } from '../chat/history.js';
-import { getLead, upsertLead } from '../chat/leads.js';
+import { getLead, upsertLead, deleteLeadCompletely } from '../chat/leads.js';
 import { globalWhatsAppManager } from '../whatsapp/whatsapp-manager.js';
 import { getWaSessionStatus, isWaSessionStaleConnecting, setWaSessionStatus, removeWaSessionStatus } from '../whatsapp/status.js';
 import { clearAuthState } from '../whatsapp/auth.js';
@@ -231,7 +231,7 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
         }
     });
 
-    // 11. Customer Update / Clear
+    // 11. Customer Update / Delete / Clear
     router.post('/customer/update', async (req: Request, res: Response) => {
         try {
             const { jid, name, phone, preferences, address, notes } = req.body;
@@ -243,12 +243,22 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
         }
     });
 
+    router.post('/customer/delete', async (req: Request, res: Response) => {
+        try {
+            const jid = String(req.body.jid || '').trim();
+            if (!jid) return res.status(400).json({ error: 'JID wajib diisi' });
+            await deleteLeadCompletely(jid);
+            return res.json({ ok: true });
+        } catch (err: any) {
+            return res.status(500).json({ error: err.message });
+        }
+    });
+
     router.post('/customer/clear', async (req: Request, res: Response) => {
         try {
             const jid = String(req.body.jid || '').trim();
             if (jid) {
-                await pool.query('DELETE FROM chat_history WHERE jid = $1', [jid]);
-                await pool.query('UPDATE leads SET greeted_at = NULL WHERE jid = $1', [jid]);
+                await deleteLeadCompletely(jid);
             }
             return res.json({ ok: true });
         } catch (err: any) {

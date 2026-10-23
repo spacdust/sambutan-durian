@@ -52,6 +52,20 @@ export const initSchema = async (database: Database = pool) => {
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             );
 
+            CREATE TABLE IF NOT EXISTS existing_contacts (
+                id TEXT PRIMARY KEY,
+                phone TEXT,
+                jid TEXT,
+                lid TEXT,
+                name TEXT,
+                source TEXT DEFAULT 'history_sync',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_existing_contacts_phone ON existing_contacts(phone);
+            CREATE INDEX IF NOT EXISTS idx_existing_contacts_jid ON existing_contacts(jid);
+            CREATE INDEX IF NOT EXISTS idx_existing_contacts_lid ON existing_contacts(lid);
+
             INSERT INTO bot_runtime_control (id, enabled) VALUES (1, TRUE) ON CONFLICT (id) DO NOTHING;
             INSERT INTO whatsapp_config (id, rotation_mode) VALUES (1, 'round_robin') ON CONFLICT (id) DO NOTHING;
         `);
@@ -105,6 +119,20 @@ export const initSchema = async (database: Database = pool) => {
                 activated_at TEXT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS existing_contacts (
+                id TEXT PRIMARY KEY,
+                phone TEXT,
+                jid TEXT,
+                lid TEXT,
+                name TEXT,
+                source TEXT DEFAULT 'history_sync',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_existing_contacts_phone ON existing_contacts(phone);
+            CREATE INDEX IF NOT EXISTS idx_existing_contacts_jid ON existing_contacts(jid);
+            CREATE INDEX IF NOT EXISTS idx_existing_contacts_lid ON existing_contacts(lid);
 
             INSERT OR IGNORE INTO bot_runtime_control (id, enabled) VALUES (1, 1);
             INSERT OR IGNORE INTO whatsapp_config (id, rotation_mode) VALUES (1, 'round_robin');

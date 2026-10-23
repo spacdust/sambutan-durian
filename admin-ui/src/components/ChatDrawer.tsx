@@ -239,18 +239,20 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ jid, onClose, onRefreshL
   };
 
   const handleClearHistory = async () => {
-    if (!jid || !confirm('Yakin ingin menghapus riwayat pesan dan data untuk nomor ini? Data yang sudah dihapus tidak dapat dikembalikan.')) return;
+    if (!jid || !confirm('Yakin ingin menghapus data customer ini beserta seluruh riwayat chat dari daftar? Data yang dihapus tidak dapat dikembalikan.')) return;
     try {
-      if (typeof api.leads.clearChat === 'function') {
+      if (typeof api.leads.deleteLead === 'function') {
+        await api.leads.deleteLead(jid);
+      } else if (typeof api.leads.clearChat === 'function') {
         await api.leads.clearChat(jid);
       } else if (typeof api.leads.clearHistory === 'function') {
         await api.leads.clearHistory(jid);
       }
-      toast.success('Riwayat pesan dan data berhasil dibersihkan.', 'Riwayat Dibersihkan');
+      toast.success('Data customer dan seluruh riwayat chat berhasil dihapus dari daftar.', 'Data Dihapus');
       onClose();
       if (onRefreshList) onRefreshList();
     } catch (err: any) {
-      toast.error(err.message || 'Gagal membersihkan riwayat', 'Gagal Membersihkan');
+      toast.error(err.message || 'Gagal menghapus data', 'Gagal Menghapus');
     }
   };
 

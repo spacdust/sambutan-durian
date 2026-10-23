@@ -13,7 +13,8 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
-  ArrowDownUp
+  ArrowDownUp,
+  Trash2
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
@@ -52,6 +53,18 @@ export const LeadsView: React.FC = () => {
       console.error(err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDeleteLead = async (jid: string, name?: string) => {
+    if (!confirm(`Hapus data ${name || jid} dan seluruh riwayat chatnya dari daftar? Data yang dihapus tidak dapat dikembalikan.`)) return;
+    try {
+      await api.leads.deleteLead(jid);
+      setLeads((prev) => prev.filter((l) => l.jid !== jid));
+      toast.success('Data customer dan riwayat chat berhasil dihapus dari daftar.', 'Data Dihapus');
+      fetchLeads(page, search, sort, direction, true);
+    } catch (err: any) {
+      toast.error(err.message || 'Gagal menghapus data', 'Gagal Menghapus');
     }
   };
 
@@ -335,18 +348,32 @@ export const LeadsView: React.FC = () => {
                       </TableCell>
 
                       <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 text-xs font-medium text-primary hover:text-primary hover:bg-primary/10 cursor-pointer"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedJid(lead.jid);
-                          }}
-                        >
-                          <MessageSquare size={13} className="mr-1" />
-                          <span>Buka Chat</span>
-                        </Button>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 text-xs font-medium text-primary hover:text-primary hover:bg-primary/10 cursor-pointer"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedJid(lead.jid);
+                            }}
+                          >
+                            <MessageSquare size={13} className="mr-1" />
+                            <span>Buka Chat</span>
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-xs font-medium text-destructive hover:text-destructive hover:bg-destructive/10 cursor-pointer"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteLead(lead.jid, lead.name);
+                            }}
+                            title="Hapus dari daftar & riwayat chat"
+                          >
+                            <Trash2 size={13} />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );

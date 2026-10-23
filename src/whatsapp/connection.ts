@@ -21,7 +21,7 @@ import { globalWhatsAppManager } from './whatsapp-manager.js';
 import { calculateRandomDelayMs, calculateTypingDurationMs } from './anti-ban-delay.js';
 import { PerNumberQueue } from './per-number-queue.js';
 import { appLogger } from '../config/logger.js';
-import { upsertLead, hasCustomerBeenGreeted, shouldCustomerBeGreeted, markCustomerGreeted } from '../chat/leads.js';
+import { upsertLead, hasCustomerBeenGreeted, shouldCustomerBeGreeted, markCustomerGreeted, resolveContactJids, recordExistingContact } from '../chat/leads.js';
 import { saveMessage, getChatHistory } from '../chat/history.js';
 import { pool } from '../config/db.js';
 import { getBotRuntimeControl } from './bot-runtime-control.js';
@@ -136,7 +136,7 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
             },
             printQRInTerminal: false,
             generateHighQualityLinkPreview: false,
-            syncFullHistory: false,
+            syncFullHistory: true,
             browser: Browsers.macOS('Chrome'),
             markOnlineOnConnect: true,
             getMessage: async () => undefined,
@@ -287,9 +287,17 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
         });
 
         // Handle History Sync: protect existing WhatsApp chats from automated greetings
-        sock.ev.on('messaging-history.set', async ({ chats }) => {
+        sock.ev.on('messaging-history.set', async ({ chats, contacts, messages }: any) => {
             const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
-            appLogger.info({ component: 'whatsapp', sessionId: runtimeSessionId, count: chats?.length || 0 }, 'whatsapp.history_sync_received');
+            appLogger.info({
+                component: 'whatsapp',
+                sessionId: runtimeSessionId,
+                chatCount: chats?.length || 0,
+                contactCount: contacts?.length || 0,
+                messageCount: messages?.length || 0
+            }, 'whatsapp.history_sync_received');
+
+            // 1. Process chats
             for (const chat of chats || []) {
                 const chatId = chat.id;
                 if (!chatId || chatId.endsWith('@g.us') || chatId === 'status@broadcast' || chatId.endsWith('@broadcast') || chatId.endsWith('@newsletter')) {
@@ -299,13 +307,52 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 if (!isUserChat) continue;
 
                 try {
-                    const cleanPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '');
-                    await pool.query(
-                        `INSERT INTO leads (jid, phone, status, greeted_at, updated_at)
-                         VALUES ($1, $2, 'existing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                         ON CONFLICT (jid) DO UPDATE SET greeted_at = COALESCE(leads.greeted_at, CURRENT_TIMESTAMP)`,
-                        [chatId, cleanPhone]
-                    );
+                    const pnJid = chat.pnJid || (chatId.endsWith('@s.whatsapp.net') ? chatId : undefined);
+                    const lidJid = chat.lidJid || (chatId.endsWith('@lid') ? chatId : undefined);
+                    const cleanPhone = pnJid ? pnJid.replace('@s.whatsapp.net', '') : undefined;
+                    const name = chat.name || chat.displayName || undefined;
+
+                    await recordExistingContact({
+                        jid: pnJid || chatId,
+                        phone: cleanPhone,
+                        lid: lidJid,
+                        name,
+                        source: 'history_sync_chat'
+                    });
+                } catch {}
+            }
+
+            // 2. Process contacts
+            for (const contact of contacts || []) {
+                const contactId = contact.id;
+                if (!contactId || contactId.endsWith('@g.us') || contactId.endsWith('@broadcast')) continue;
+                try {
+                    const pnJid = contactId.endsWith('@s.whatsapp.net') ? contactId : undefined;
+                    const cleanPhone = pnJid ? pnJid.replace('@s.whatsapp.net', '') : undefined;
+                    const lidJid = contact.lid ? (contact.lid.endsWith('@lid') ? contact.lid : `${contact.lid}@lid`) : undefined;
+                    const name = contact.name || contact.notify || undefined;
+
+                    await recordExistingContact({
+                        jid: contactId,
+                        phone: cleanPhone,
+                        lid: lidJid,
+                        name,
+                        source: 'history_sync_contact'
+                    });
+                } catch {}
+            }
+
+            // 3. Process historical messages
+            for (const msg of messages || []) {
+                const rJid = msg.key?.remoteJid;
+                if (!rJid || rJid.endsWith('@g.us') || rJid.endsWith('@broadcast') || rJid.endsWith('@newsletter')) continue;
+                try {
+                    const cleanPhone = rJid.endsWith('@s.whatsapp.net') ? rJid.replace('@s.whatsapp.net', '') : undefined;
+                    await recordExistingContact({
+                        jid: rJid,
+                        phone: cleanPhone,
+                        source: 'history_sync_msg'
+                    });
                 } catch {}
             }
         });
@@ -402,7 +449,7 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                         } else {
                             // A human CS manually typed a reply to a customer who already chatted
                             await saveMessage(jid, 'assistant', text || '[Media]', 'admin', msg.key.id || undefined);
-                            await markCustomerGreeted(jid);
+                            await markCustomerGreeted(jid, sock);
                             appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.manual_cs_reply_recorded');
                         }
                     }
@@ -423,12 +470,37 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                     globalWhatsAppManager.setStickyAssignment(jid, runtimeSessionId);
                 }
 
-                // Save lead & history
-                const customerPhone = jid.replace('@s.whatsapp.net', '').replace('@lid', '');
+                // Resolve contact JIDs and real phone number
+                const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid, sock);
+                const leadPhone = cleanPhone && !cleanPhone.includes('@') ? cleanPhone : (jid.endsWith('@s.whatsapp.net') ? jid.replace('@s.whatsapp.net', '') : undefined);
                 const pushName = msg.pushName || '';
-                await upsertLead({ jid, phone: customerPhone, name: pushName || undefined });
+
+                // Check if customer quoted an earlier conversation message (not an automated ad greeting)
+                const contextInfo = (rawContent as any)?.extendedTextMessage?.contextInfo
+                    || (msg.message as any)?.extendedTextMessage?.contextInfo
+                    || (rawContent as any)?.contextInfo
+                    || (msg.message as any)?.contextInfo;
+
+                const isQuotedOldMessage = Boolean(
+                    contextInfo?.quotedMessage &&
+                    !contextInfo?.externalAdReply &&
+                    !contextInfo?.quotedAd &&
+                    !contextInfo?.entryPointConversionApp
+                );
+
+                if (isQuotedOldMessage) {
+                    await recordExistingContact({
+                        jid,
+                        phone: leadPhone,
+                        lid: lidJid,
+                        source: 'quoted_old_chat'
+                    });
+                }
+
+                // Save lead & history with resolved real phone number
+                await upsertLead({ jid, phone: leadPhone, name: pushName || undefined });
                 await saveMessage(jid, 'user', text || '[Media]', 'customer', msg.key.id || undefined);
-                appLogger.info({ component: 'whatsapp', jid, text: text.slice(0, 50), from: pushName }, 'whatsapp.message_received');
+                appLogger.info({ component: 'whatsapp', jid, phone: leadPhone, text: text.slice(0, 50), from: pushName }, 'whatsapp.message_received');
 
                 // Filter for auto-greeting: only recent messages (within 10 minutes)
                 const msgTimestamp = typeof msg.messageTimestamp === 'number'
@@ -454,7 +526,7 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                     if (!greetingInProgress.has(jid)) {
                         greetingInProgress.add(jid);
                         try {
-                            const shouldGreet = await shouldCustomerBeGreeted(jid);
+                            const shouldGreet = await shouldCustomerBeGreeted(jid, sock);
                             if (shouldGreet) {
                                 let welcomeText = bizConfig.welcomeMessage;
                                 if (pushName) {
@@ -478,7 +550,7 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
 
                                         const sent = await sock.sendMessage(jid, { text: welcomeText });
                                         await saveMessage(jid, 'assistant', welcomeText, 'bot', sent?.key?.id || undefined);
-                                        await markCustomerGreeted(jid);
+                                        await markCustomerGreeted(jid, sock);
 
                                         if (runtimeSessionId !== 'legacy' && runtimeSessionId !== 'pending') {
                                             globalWhatsAppManager.recordMessageSent(runtimeSessionId);

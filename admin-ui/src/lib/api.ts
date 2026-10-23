@@ -244,13 +244,18 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ jid, ...data }),
       }),
+    deleteLead: (jid: string) =>
+      apiRequest<{ ok: boolean }>('/admin/api/customer/delete', {
+        method: 'POST',
+        body: JSON.stringify({ jid }),
+      }),
     clearChat: (jid: string) =>
-      apiRequest<{ ok: boolean }>('/admin/api/customer/clear', {
+      apiRequest<{ ok: boolean }>('/admin/api/customer/delete', {
         method: 'POST',
         body: JSON.stringify({ jid }),
       }),
     clearHistory: (jid: string) =>
-      apiRequest<{ ok: boolean }>('/admin/api/customer/clear', {
+      apiRequest<{ ok: boolean }>('/admin/api/customer/delete', {
         method: 'POST',
         body: JSON.stringify({ jid }),
       }),
