@@ -124,11 +124,13 @@ export const WhatsAppView: React.FC = () => {
   useEffect(() => {
     let timer: any = null;
     if (showAddModal) {
+      setPairingCode('');
+      setLoadingPairingCode(false);
       // Immediate check once
       api.whatsapp.getPendingQr().then((res) => {
         setPendingQrData(res);
-        if (res?.phone) {
-          setInputPhone((prev) => prev || res.phone);
+        if (res?.state === 'open' && res?.phone) {
+          setInputPhone(res.phone);
         }
       }).catch(() => {});
 
@@ -136,16 +138,14 @@ export const WhatsAppView: React.FC = () => {
         try {
           const res = await api.whatsapp.getPendingQr();
           setPendingQrData(res);
-          if (res?.phone) {
-            setInputPhone((prev) => prev || res.phone);
-          }
-          if (res.state === 'open') {
+          if (res?.state === 'open') {
+            if (res.phone) setInputPhone((prev) => prev || res.phone);
             clearInterval(timer);
           }
         } catch (err) {
           console.error(err);
         }
-      }, 3000);
+      }, 2500);
     }
     return () => {
       if (timer) clearInterval(timer);
@@ -154,6 +154,10 @@ export const WhatsAppView: React.FC = () => {
 
   const handleSaveNewNumber = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isPendingConnected) {
+      toast.warning('WhatsApp belum selesai ditautkan di HP. Masukkan kode pairing atau scan QR terlebih dahulu sampai status terhubung.', 'Belum Terhubung');
+      return;
+    }
     const phoneToSave = (inputPhone || pendingQrData?.phone || pairingPhone || '').replace(/\D/g, '');
     if (!phoneToSave || phoneToSave.length < 9) {
       toast.warning('Harap masukkan nomor WhatsApp yang valid (contoh: 6281234567890).', 'Nomor Diperlukan');
@@ -245,8 +249,8 @@ export const WhatsAppView: React.FC = () => {
   };
 
   const effectivePhone = (inputPhone || pendingQrData?.phone || pairingPhone || '').replace(/\D/g, '');
-  const isPendingConnected = pendingQrData?.state === 'open' || Boolean(pendingQrData?.phone);
-  const canSave = Boolean(effectivePhone && effectivePhone.length >= 9);
+  const isPendingConnected = pendingQrData?.state === 'open';
+  const canSave = isPendingConnected && Boolean(effectivePhone && effectivePhone.length >= 9);
 
   return (
     <div className="space-y-6 max-w-7xl">
@@ -569,6 +573,10 @@ export const WhatsAppView: React.FC = () => {
                         <p className="text-[11px] text-muted-foreground leading-relaxed">
                           Buka <strong>WhatsApp &gt; Setelan &gt; Perangkat Tertaut &gt; Tautkan Perangkat &gt; Tautkan dengan nomor telepon</strong> di HP Anda, lalu masukkan 8 karakter kode di atas.
                         </p>
+                        <div className="pt-1 flex items-center justify-center gap-2 text-xs text-amber-600 dark:text-amber-400 font-medium animate-pulse">
+                          <RefreshCw size={12} className="animate-spin" />
+                          Menunggu konfirmasi penautan di HP WhatsApp Anda...
+                        </div>
                       </div>
                     )}
                   </div>
@@ -580,9 +588,9 @@ export const WhatsAppView: React.FC = () => {
               <div className="space-y-1">
                 <div className="flex justify-between items-center">
                   <label className="text-xs font-semibold text-muted-foreground uppercase">Nomor WhatsApp</label>
-                  {(pendingQrData?.phone || isPendingConnected) && (
+                  {isPendingConnected && (
                     <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium flex items-center gap-1">
-                      <Check size={12} /> WhatsApp Terdeteksi
+                      <Check size={12} /> WhatsApp Berhasil Terhubung
                     </span>
                   )}
                 </div>
@@ -635,7 +643,7 @@ export const WhatsAppView: React.FC = () => {
                   Batal
                 </Button>
                 <Button type="submit" disabled={savingNewNumber || !canSave}>
-                  <CheckCircle2 size={14} className="mr-1" /> {savingNewNumber ? 'Menyimpan…' : 'Simpan & Aktifkan CS'}
+                  <CheckCircle2 size={14} className="mr-1" /> {savingNewNumber ? 'Menyimpan…' : (isPendingConnected ? 'Simpan & Aktifkan CS' : 'Menunggu WhatsApp Terhubung di HP...')}
                 </Button>
               </div>
             </form>

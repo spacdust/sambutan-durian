@@ -168,21 +168,17 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 if (phone) {
                     activeSockets.set(phone, sock);
                     sessionAliases.set(sessionId, phone);
+                    const currentStatus = getWaSessionStatus(sessionId);
                     setWaSessionStatus(sessionId, {
-                        state: 'open',
-                        detail: 'Nomor WhatsApp berhasil ditautkan!',
+                        ...currentStatus,
                         phone,
-                        qr: undefined,
-                        qrUrl: undefined,
                     });
                     const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
                     if (runtimeSessionId !== sessionId) {
+                        const runtimeStatus = getWaSessionStatus(runtimeSessionId);
                         setWaSessionStatus(runtimeSessionId, {
-                            state: 'open',
-                            detail: 'Terhubung',
+                            ...runtimeStatus,
                             phone,
-                            qr: undefined,
-                            qrUrl: undefined,
                         });
                     }
                     appLogger.info({ component: 'whatsapp', sessionId, phone }, 'whatsapp.creds_phone_detected');

@@ -66,7 +66,7 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
                 const live = getWaSessionStatus(session.phone);
                 return {
                     ...session,
-                    status: live.state === 'open' ? 'online' : (session.status || 'disconnected'),
+                    status: live.state === 'open' ? 'online' : (live.state === 'connecting' ? 'connecting' : 'disconnected'),
                 };
             });
 
@@ -263,13 +263,13 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
             const config = globalWhatsAppManager.getConfig();
             const result = numbers.map((n) => {
                 const status = getWaSessionStatus(n.phone);
-                const isOnline = status.state === 'open' || n.status === 'online';
+                const isOnline = status.state === 'open';
                 return {
                     id: n.id,
                     phone: n.phone,
                     csName: n.csNameOverride || 'CS',
-                    status: isOnline ? 'online' : n.status,
-                    state: isOnline ? 'open' : status.state,
+                    status: isOnline ? 'online' : (status.state === 'connecting' ? 'connecting' : 'disconnected'),
+                    state: status.state,
                     dailyLimit: n.dailyLimit,
                     todayLeadCount: n.todayLeadCount,
                     todayMessageCount: n.todayMessageCount,
@@ -289,27 +289,7 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
     // 13. WhatsApp Pending Status (QR / Pairing)
     router.get('/whatsapp/qr/pending', async (_req: Request, res: Response) => {
         try {
-            let wa = getWaSessionStatus('pending');
-            if (!wa.phone) {
-                try {
-                    const credsRes = await pool.query("SELECT data FROM auth_keys WHERE id = 'wa:pending:creds'");
-                    const credsData = credsRes.rows[0]?.data;
-                    const meId = credsData?.me?.id;
-                    if (meId) {
-                        const phone = String(meId).split(':')[0].split('@')[0];
-                        if (phone) {
-                            setWaSessionStatus('pending', {
-                                state: 'open',
-                                detail: 'Nomor WhatsApp berhasil terdeteksi!',
-                                phone,
-                                qr: undefined,
-                                qrUrl: undefined,
-                            });
-                            wa = getWaSessionStatus('pending');
-                        }
-                    }
-                } catch {}
-            }
+            const wa = getWaSessionStatus('pending');
             let qrDataUrl = '';
             if (wa.qr) {
                 try {
@@ -419,6 +399,12 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
 
             if (!phone) {
                 return res.status(400).json({ error: 'Nomor WhatsApp belum terdeteksi. Silakan masukkan nomor atau hubungkan WhatsApp terlebih dahulu.' });
+            }
+
+            if (pendingStatus.state !== 'open') {
+                return res.status(400).json({
+                    error: 'WhatsApp belum berhasil terhubung di HP. Pastikan Anda telah memasukkan kode pairing atau scan QR di WhatsApp HP sampai muncul status terhubung di aplikasi.'
+                });
             }
 
             await adoptPendingWhatsAppSession(phone, id, csName, dailyLimit);
