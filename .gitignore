@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+admin-ui/node_modules/
+*/node_modules/
+
+# Production builds
+dist/
+admin-ui/dist/
+*/dist/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.env
+*.pem
+*.key
+*.cert
+*.crt
+
+# WhatsApp Runtime Data & Sessions
+config/whatsapp-sessions.json
+config/*.json
+!config/whatsapp-sessions.example.json
+!business.config.json
+!business.config.example.json
+
+# Database & SQLite files
+data/*
+!data/.gitkeep
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.lock
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj

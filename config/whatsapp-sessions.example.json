@@ -1,0 +1,11 @@
+{
+  "config": {
+    "rotationMode": "round_robin",
+    "minDelaySeconds": 3,
+    "maxDelaySeconds": 5,
+    "maxConcurrency": 3,
+    "enableStickyAssignment": true
+  },
+  "sessions": [],
+  "stickyAssignments": {}
+}

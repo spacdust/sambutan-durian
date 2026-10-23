@@ -1,0 +1,8 @@
+{
+  "businessName": "Sambutan Durian",
+  "csName": "Admin Durian",
+  "productType": "physical",
+  "welcomeMessage": "Halo {{nama}}! Selamat datang di Sambutan Durian 🍈 Mau pesan durian apa hari ini kak?",
+  "enableGreeting": true,
+  "adminPhone": ""
+}
