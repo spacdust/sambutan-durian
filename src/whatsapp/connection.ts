@@ -21,8 +21,9 @@ import { globalWhatsAppManager } from './whatsapp-manager.js';
 import { calculateRandomDelayMs, calculateTypingDurationMs } from './anti-ban-delay.js';
 import { PerNumberQueue } from './per-number-queue.js';
 import { appLogger } from '../config/logger.js';
-import { upsertLead, hasCustomerBeenGreeted, markCustomerGreeted } from '../chat/leads.js';
+import { upsertLead, hasCustomerBeenGreeted, shouldCustomerBeGreeted, markCustomerGreeted } from '../chat/leads.js';
 import { saveMessage, getChatHistory } from '../chat/history.js';
+import { pool } from '../config/db.js';
 import { getBotRuntimeControl } from './bot-runtime-control.js';
 import { getBusinessConfig } from '../config/business.js';
 
@@ -285,6 +286,30 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
             }
         });
 
+        // Handle History Sync: protect existing WhatsApp chats from automated greetings
+        sock.ev.on('messaging-history.set', async ({ chats }) => {
+            const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
+            appLogger.info({ component: 'whatsapp', sessionId: runtimeSessionId, count: chats?.length || 0 }, 'whatsapp.history_sync_received');
+            for (const chat of chats || []) {
+                const chatId = chat.id;
+                if (!chatId || chatId.endsWith('@g.us') || chatId === 'status@broadcast' || chatId.endsWith('@broadcast') || chatId.endsWith('@newsletter')) {
+                    continue;
+                }
+                const isUserChat = chatId.endsWith('@s.whatsapp.net') || chatId.endsWith('@lid');
+                if (!isUserChat) continue;
+
+                try {
+                    const cleanPhone = chatId.replace('@s.whatsapp.net', '').replace('@lid', '');
+                    await pool.query(
+                        `INSERT INTO leads (jid, phone, status, greeted_at, updated_at)
+                         VALUES ($1, $2, 'existing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                         ON CONFLICT (jid) DO UPDATE SET greeted_at = COALESCE(leads.greeted_at, CURRENT_TIMESTAMP)`,
+                        [chatId, cleanPhone]
+                    );
+                } catch {}
+            }
+        });
+
         // Handle Inbound & Outbound Messages
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
@@ -346,11 +371,40 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                     rawContent.stickerMessage
                 );
 
-                // Handle messages sent from our own device (e.g. manual reply from phone)
+                // Handle messages sent from our own account (manual CS reply or automated salam/ad greeting)
                 if (msg.key.fromMe) {
                     if (text || hasMedia) {
-                        await saveMessage(jid, 'assistant', text || '[Media]', 'admin', msg.key.id || undefined);
-                        await markCustomerGreeted(jid);
+                        const contextInfo = (rawContent as any)?.extendedTextMessage?.contextInfo
+                            || (msg.message as any)?.extendedTextMessage?.contextInfo
+                            || (rawContent as any)?.contextInfo
+                            || (msg.message as any)?.contextInfo;
+
+                        const isAdOrAutoGreeting = Boolean(
+                            contextInfo?.externalAdReply ||
+                            contextInfo?.quotedAd ||
+                            contextInfo?.entryPointConversionApp ||
+                            contextInfo?.entryPointConversionSource ||
+                            contextInfo?.ctwaClid ||
+                            contextInfo?.ctwaSignals
+                        );
+
+                        // Check if the customer has ever sent a message in this chat
+                        const userHistory = await pool.query(
+                            "SELECT 1 FROM chat_history WHERE jid = $1 AND role = 'user' LIMIT 1",
+                            [jid]
+                        );
+                        const hasCustomerSpoken = userHistory.rows.length > 0;
+
+                        // If it has ad preview OR was sent before the customer ever sent a message, it is an automated greeting ("Salam otomatis")
+                        if (isAdOrAutoGreeting || !hasCustomerSpoken) {
+                            await saveMessage(jid, 'assistant', text || '[Media]', 'salam_otomatis', msg.key.id || undefined);
+                            appLogger.info({ component: 'whatsapp', jid, isAdOrAutoGreeting }, 'whatsapp.salam_otomatis_recorded');
+                        } else {
+                            // A human CS manually typed a reply to a customer who already chatted
+                            await saveMessage(jid, 'assistant', text || '[Media]', 'admin', msg.key.id || undefined);
+                            await markCustomerGreeted(jid);
+                            appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.manual_cs_reply_recorded');
+                        }
                     }
                     continue;
                 }
@@ -388,7 +442,11 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                     continue;
                 }
 
-                // Check Sambutan Durian auto-greeting (Hanya untuk pesan pertama kali masuk)
+                // Check Sambutan Durian auto-greeting
+                // Kondisi:
+                // 1. Nomor baru yang baru chat dan belum pernah dibalas
+                // 2. Nomor baru yang baru chat + pesan salam otomatis (misal dari iklan Facebook / WA Business)
+                // Jika sudah ada riwayat percakapan sebelumnya / sudah pernah dibalas -> TIDAK dibalas
                 const botControl = await getBotRuntimeControl();
                 const bizConfig = getBusinessConfig();
 
@@ -396,8 +454,8 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                     if (!greetingInProgress.has(jid)) {
                         greetingInProgress.add(jid);
                         try {
-                            const alreadyGreeted = await hasCustomerBeenGreeted(jid);
-                            if (!alreadyGreeted) {
+                            const shouldGreet = await shouldCustomerBeGreeted(jid);
+                            if (shouldGreet) {
                                 let welcomeText = bizConfig.welcomeMessage;
                                 if (pushName) {
                                     welcomeText = welcomeText.replace(/{{nama}}|{nama}|{{name}}|{name}/gi, pushName);
@@ -429,7 +487,7 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                                     }
                                 );
                             } else {
-                                appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.greeting_skipped_already_greeted');
+                                appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.greeting_skipped_conditions_not_met');
                             }
                         } catch (err) {
                             appLogger.error({ component: 'whatsapp', jid, err }, 'whatsapp.auto_greeting_failed');

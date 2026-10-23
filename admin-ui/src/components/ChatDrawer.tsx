@@ -440,6 +440,8 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ jid, onClose, onRefreshL
                 detail.transcript.map((msg) => {
                   const isUser = msg.role === 'user' || msg.sender_type === 'customer' || msg.sender === 'user';
                   const isAdmin = msg.sender_type === 'admin';
+                  const isSalamOtomatis = msg.sender_type === 'salam_otomatis';
+                  const isBot = msg.sender_type === 'bot';
                   return (
                     <div
                       key={msg.id}
@@ -452,6 +454,16 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ jid, onClose, onRefreshL
                       {isAdmin && (
                         <div className="text-[10px] font-bold text-primary mb-0.5 uppercase tracking-wide">
                           Admin CS
+                        </div>
+                      )}
+                      {isSalamOtomatis && (
+                        <div className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 mb-0.5 uppercase tracking-wide">
+                          Salam Otomatis
+                        </div>
+                      )}
+                      {isBot && (
+                        <div className="text-[10px] font-bold text-amber-600 dark:text-amber-400 mb-0.5 uppercase tracking-wide">
+                          Sambutan Durian
                         </div>
                       )}
                       <div className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</div>

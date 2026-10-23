@@ -8,7 +8,7 @@ export interface ChatMessage {
     id?: number;
     role: 'user' | 'assistant';
     content: string;
-    sender_type?: 'customer' | 'bot' | 'admin';
+    sender_type?: 'customer' | 'bot' | 'admin' | 'salam_otomatis';
     created_at?: string;
 }
 
@@ -19,7 +19,7 @@ export const saveMessageTo = async (
     jid: string,
     role: 'user' | 'assistant',
     content: string,
-    senderType: 'customer' | 'bot' | 'admin' = role === 'user' ? 'customer' : 'bot',
+    senderType: 'customer' | 'bot' | 'admin' | 'salam_otomatis' = role === 'user' ? 'customer' : 'bot',
     providerMessageId?: string,
 ) => {
     const result = await database.query(
@@ -51,7 +51,7 @@ export const saveMessage = async (
     jid: string,
     role: 'user' | 'assistant',
     content: string,
-    senderType: 'customer' | 'bot' | 'admin' = role === 'user' ? 'customer' : 'bot',
+    senderType: 'customer' | 'bot' | 'admin' | 'salam_otomatis' = role === 'user' ? 'customer' : 'bot',
     providerMessageId?: string
 ) => saveMessageTo(pool, jid, role, content, senderType, providerMessageId);
 

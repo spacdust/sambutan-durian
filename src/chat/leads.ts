@@ -54,18 +54,54 @@ export const getLead = async (jid: string): Promise<Lead | null> => {
     return rows[0] || null;
 };
 
-export const hasCustomerBeenGreeted = async (jid: string): Promise<boolean> => {
+export const shouldCustomerBeGreeted = async (jid: string): Promise<boolean> => {
     try {
-        // 1. Check if leads table records greeted_at
-        const lead = await pool.query('SELECT greeted_at FROM leads WHERE jid = $1', [jid]);
-        if (lead.rows[0]?.greeted_at) return true;
+        // 1. Check if lead is marked as already greeted or an existing customer from history
+        const leadRes = await pool.query('SELECT status, greeted_at FROM leads WHERE jid = $1', [jid]);
+        const lead = leadRes.rows[0];
+        if (lead) {
+            if (lead.greeted_at) return false;
+            if (lead.status === 'existing') return false;
+        }
 
-        // 2. Check if an assistant/bot message has already been recorded in chat_history
-        const history = await pool.query('SELECT 1 FROM chat_history WHERE jid = $1 AND role = $2 LIMIT 1', [jid, 'assistant']);
-        return Boolean(history.rows.length > 0);
+        // 2. Check if Sambutan Durian bot has EVER sent a welcome greeting to this customer
+        const botHistory = await pool.query(
+            "SELECT 1 FROM chat_history WHERE jid = $1 AND sender_type = 'bot' LIMIT 1",
+            [jid]
+        );
+        if (botHistory.rows.length > 0) return false;
+
+        // 3. Check customer message count:
+        // Must be the first incoming message from customer (count <= 1)
+        const userMsgCountRes = await pool.query(
+            "SELECT COUNT(*) AS count FROM chat_history WHERE jid = $1 AND role = 'user'",
+            [jid]
+        );
+        const userMsgCount = Number(userMsgCountRes.rows[0]?.count || 0);
+        if (userMsgCount > 1) {
+            // Customer has sent multiple messages in the past -> do not greet
+            return false;
+        }
+
+        // 4. Check if a human CS has already manually replied
+        // Only actual human replies count (sender_type = 'admin'), excluding automated greetings (sender_type = 'salam_otomatis')
+        const humanReply = await pool.query(
+            "SELECT 1 FROM chat_history WHERE jid = $1 AND role = 'assistant' AND sender_type = 'admin' LIMIT 1",
+            [jid]
+        );
+        if (humanReply.rows.length > 0) return false;
+
+        // Condition met:
+        // 1. Nomor baru yang baru chat dan belum pernah dibalas (userMsgCount <= 1, no bot/human reply).
+        // 2. Nomor baru yang baru chat + pesan salam otomatis (sender_type = 'salam_otomatis').
+        return true;
     } catch {
         return false;
     }
+};
+
+export const hasCustomerBeenGreeted = async (jid: string): Promise<boolean> => {
+    return !(await shouldCustomerBeGreeted(jid));
 };
 
 export const markCustomerGreeted = async (jid: string): Promise<void> => {
