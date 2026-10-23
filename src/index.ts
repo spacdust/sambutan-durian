@@ -1,6 +1,7 @@
 import { acquireInstanceLock } from './config/instance-lock.js';
 import { connectDB, pool } from './config/db.js';
 import { initSchema } from './config/schema.js';
+import { syncExistingContactsFromAuth } from './chat/leads.js';
 import {
     startConfiguredWhatsAppConnections,
     stopWhatsAppConnection,
@@ -41,6 +42,7 @@ const init = async () => {
     // 1. Hubungkan ke Database & buat tabel
     await connectDB();
     await initSchema();
+    await syncExistingContactsFromAuth();
     await enableBotRuntime();
 
     // 2. Mulai Web Admin Server

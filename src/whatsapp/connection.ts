@@ -357,6 +357,45 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
             }
         });
 
+        // Track active chats from phone
+        sock.ev.on('chats.upsert', async (chats: any[]) => {
+            for (const chat of chats || []) {
+                const chatId = chat.id;
+                if (!chatId || chatId.endsWith('@g.us') || chatId.endsWith('@broadcast') || chatId.endsWith('@newsletter')) continue;
+                if (!chatId.endsWith('@s.whatsapp.net') && !chatId.endsWith('@lid')) continue;
+                try {
+                    const info = await resolveContactJids(chatId, sock);
+                    await recordExistingContact({
+                        id: info.cleanPhone || chatId,
+                        phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
+                        jid: info.phoneJid,
+                        lid: info.lidJid,
+                        name: chat.name || chat.displayName || undefined,
+                        source: 'chats_upsert'
+                    });
+                } catch {}
+            }
+        });
+
+        sock.ev.on('chats.update', async (chatUpdates: any[]) => {
+            for (const chat of chatUpdates || []) {
+                const chatId = chat.id;
+                if (!chatId || chatId.endsWith('@g.us') || chatId.endsWith('@broadcast') || chatId.endsWith('@newsletter')) continue;
+                if (!chatId.endsWith('@s.whatsapp.net') && !chatId.endsWith('@lid')) continue;
+                try {
+                    const info = await resolveContactJids(chatId, sock);
+                    await recordExistingContact({
+                        id: info.cleanPhone || chatId,
+                        phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
+                        jid: info.phoneJid,
+                        lid: info.lidJid,
+                        name: chat.name || chat.displayName || undefined,
+                        source: 'chats_update'
+                    });
+                } catch {}
+            }
+        });
+
         // Handle Inbound & Outbound Messages
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
@@ -559,6 +598,7 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                                     }
                                 );
                             } else {
+                                await markCustomerGreeted(jid, sock);
                                 appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.greeting_skipped_conditions_not_met');
                             }
                         } catch (err) {
