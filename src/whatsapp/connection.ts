@@ -321,15 +321,14 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 if (!isUserChat) continue;
 
                 try {
-                    const pnJid = chat.pnJid || (chatId.endsWith('@s.whatsapp.net') ? chatId : undefined);
-                    const lidJid = chat.lidJid || (chatId.endsWith('@lid') ? chatId : undefined);
-                    const cleanPhone = pnJid ? pnJid.replace('@s.whatsapp.net', '') : undefined;
+                    const info = await resolveContactJids(chatId, sock);
                     const name = chat.name || chat.displayName || undefined;
 
                     await recordExistingContact({
-                        jid: pnJid || chatId,
-                        phone: cleanPhone,
-                        lid: lidJid,
+                        id: info.cleanPhone || chatId,
+                        phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
+                        jid: info.phoneJid || (chatId.endsWith('@s.whatsapp.net') ? chatId : undefined),
+                        lid: info.lidJid || (chatId.endsWith('@lid') ? chatId : undefined),
                         name,
                         source: 'history_sync_chat'
                     });
@@ -361,10 +360,12 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 const rJid = msg.key?.remoteJid;
                 if (!rJid || rJid.endsWith('@g.us') || rJid.endsWith('@broadcast') || rJid.endsWith('@newsletter')) continue;
                 try {
-                    const cleanPhone = rJid.endsWith('@s.whatsapp.net') ? rJid.replace('@s.whatsapp.net', '') : undefined;
+                    const info = await resolveContactJids(rJid, sock);
                     await recordExistingContact({
-                        jid: rJid,
-                        phone: cleanPhone,
+                        id: info.cleanPhone || rJid,
+                        phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
+                        jid: info.phoneJid || (rJid.endsWith('@s.whatsapp.net') ? rJid : undefined),
+                        lid: info.lidJid || (rJid.endsWith('@lid') ? rJid : undefined),
                         source: 'history_sync_msg'
                     });
                 } catch {}
