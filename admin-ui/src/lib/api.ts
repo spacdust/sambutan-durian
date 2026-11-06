@@ -249,6 +249,16 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ jid }),
       }),
+    resetGreeting: (jid: string) =>
+      apiRequest<{ ok: boolean; message: string }>('/admin/api/customer/reset-greeting', {
+        method: 'POST',
+        body: JSON.stringify({ jid }),
+      }),
+    sendGreeting: (jid: string) =>
+      apiRequest<{ ok: boolean; message: string }>('/admin/api/customer/send-greeting', {
+        method: 'POST',
+        body: JSON.stringify({ jid }),
+      }),
     clearChat: (jid: string) =>
       apiRequest<{ ok: boolean }>('/admin/api/customer/delete', {
         method: 'POST',

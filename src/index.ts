@@ -42,7 +42,6 @@ const init = async () => {
     // 1. Hubungkan ke Database & buat tabel
     await connectDB();
     await initSchema();
-    await syncExistingContactsFromAuth();
     await enableBotRuntime();
 
     // 2. Mulai Web Admin Server

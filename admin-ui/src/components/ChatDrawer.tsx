@@ -11,6 +11,8 @@ import {
   Save,
   CheckCheck,
   CheckCircle2,
+  RotateCcw,
+  Sparkles,
 } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from './ui/sheet';
 import { Button } from './ui/button';
@@ -272,6 +274,30 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ jid, onClose, onRefreshL
     }
   };
 
+  const handleResetGreeting = async () => {
+    if (!jid) return;
+    try {
+      await api.leads.resetGreeting(jid);
+      toast.success('Status sambutan berhasil di-reset. Nomor siap untuk diuji kirim chat kembali.', 'Reset Sambutan');
+      await loadDetail(jid, true);
+      onRefreshListRef.current?.();
+    } catch (err: any) {
+      toast.error(err.message || 'Gagal mereset status sambutan', 'Gagal Reset');
+    }
+  };
+
+  const handleSendGreeting = async () => {
+    if (!jid) return;
+    try {
+      await api.leads.sendGreeting(jid);
+      toast.success('Pesan sambutan otomatis berhasil dikirim ke nomor pelanggan.', 'Sambutan Terkirim');
+      await loadDetail(jid, true);
+      onRefreshListRef.current?.();
+    } catch (err: any) {
+      toast.error(err.message || 'Gagal mengirim pesan sambutan', 'Gagal Sambutan');
+    }
+  };
+
   const isHandoff = Boolean(detail?.activeHandoff);
   const leadPhone = detail?.lead?.phone?.trim();
   const isLid = jid.endsWith('@lid');
@@ -417,14 +443,39 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({ jid, onClose, onRefreshL
               </form>
             ) : (
               /* Status Bar */
-              <div className="p-3 px-5 bg-card border-b flex justify-between items-center text-xs">
+              <div className="p-3 px-5 bg-card border-b flex flex-wrap justify-between items-center gap-2 text-xs">
                 <div>
                   <span className="text-muted-foreground">Status Sambutan: </span>
                   <strong className="text-foreground">
                     {detail?.lead?.greeted_at
                       ? `Sudah disapa pada ${formatWibDateTime(detail.lead.greeted_at)}`
-                      : 'Belum disapa (akan otomatis dibalas 1x saat mengirim pesan)'}
+                      : 'Belum disapa (akan otomatis dibalas 1x jika nomor baru)'}
                   </strong>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {!detail?.lead?.greeted_at && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10 cursor-pointer"
+                      title="Kirim pesan sambutan otomatis sekarang ke WhatsApp pelanggan"
+                      onClick={handleSendGreeting}
+                    >
+                      <Sparkles size={11} className="mr-1" />
+                      Kirim Sambutan
+                    </Button>
+                  )}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2.5 text-[11px] font-medium text-muted-foreground hover:text-foreground cursor-pointer"
+                    title="Reset status sambutan agar dapat diuji coba kirim pesan kembali"
+                    onClick={handleResetGreeting}
+                  >
+                    <RotateCcw size={11} className="mr-1" />
+                    Reset Sambutan
+                  </Button>
                 </div>
               </div>
             )}

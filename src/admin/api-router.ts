@@ -3,7 +3,7 @@ import QRCode from 'qrcode';
 import { pool } from '../config/db.js';
 import { getBusinessConfig, updateBusinessConfig } from '../config/business.js';
 import { getFullChatHistory, saveMessage, chatEvents } from '../chat/history.js';
-import { getLead, upsertLead, deleteLeadCompletely } from '../chat/leads.js';
+import { getLead, upsertLead, deleteLeadCompletely, resetCustomerGreeting, markCustomerGreeted } from '../chat/leads.js';
 import { globalWhatsAppManager } from '../whatsapp/whatsapp-manager.js';
 import { getWaSessionStatus, isWaSessionStaleConnecting, setWaSessionStatus, removeWaSessionStatus } from '../whatsapp/status.js';
 import { clearAuthState } from '../whatsapp/auth.js';
@@ -249,6 +249,34 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
             if (!jid) return res.status(400).json({ error: 'JID wajib diisi' });
             await deleteLeadCompletely(jid);
             return res.json({ ok: true });
+        } catch (err: any) {
+            return res.status(500).json({ error: err.message });
+        }
+    });
+
+    router.post('/customer/reset-greeting', async (req: Request, res: Response) => {
+        try {
+            const jid = String(req.body.jid || '').trim();
+            if (!jid) return res.status(400).json({ error: 'JID wajib diisi' });
+            await resetCustomerGreeting(jid);
+            return res.json({ ok: true, message: 'Status sambutan berhasil di-reset. Siap untuk diuji chat kembali.' });
+        } catch (err: any) {
+            return res.status(500).json({ error: err.message });
+        }
+    });
+
+    router.post('/customer/send-greeting', async (req: Request, res: Response) => {
+        try {
+            const jid = String(req.body.jid || '').trim();
+            if (!jid) return res.status(400).json({ error: 'JID wajib diisi' });
+            const lead = await getLead(jid);
+            const bizConfig = getBusinessConfig();
+            let welcomeText = bizConfig.welcomeMessage || 'Halo! Selamat datang di Sambutan Durian 🍈';
+            const name = lead?.name || 'kak';
+            welcomeText = welcomeText.replace(/{{nama}}|{nama}|{{name}}|{name}/gi, name);
+            await enqueueManualWhatsAppMessage(jid, welcomeText);
+            await markCustomerGreeted(jid);
+            return res.json({ ok: true, message: 'Pesan sambutan berhasil dikirim.' });
         } catch (err: any) {
             return res.status(500).json({ error: err.message });
         }

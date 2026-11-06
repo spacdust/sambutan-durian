@@ -49,6 +49,7 @@ const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const generations = new Map<string, number>();
 const perNumberOutboundQueue = new PerNumberQueue();
 const greetingInProgress = new Set<string>();
+export const unrepliedMessageKeys = new Map<string, any>();
 
 export const selectOutboundSessionId = (jid: string, onlineSessionIds: string[]) => {
     const sticky = globalWhatsAppManager.getStickyAssignment(jid);
@@ -87,6 +88,17 @@ export const enqueueManualWhatsAppMessage = async (jid: string, text: string, de
 
             const sent = await socket.sendMessage(jid, { text });
             await saveMessage(jid, 'assistant', text, 'admin', sent?.key?.id || undefined);
+            await markCustomerGreeted(jid, socket);
+
+            // Mark customer unread message as read (centang biru 2) now that reply is sent
+            const lastMsgKey = unrepliedMessageKeys.get(jid);
+            if (lastMsgKey && typeof (socket as any).readMessages === 'function') {
+                try {
+                    await (socket as any).readMessages([lastMsgKey]);
+                    unrepliedMessageKeys.delete(jid);
+                } catch {}
+            }
+
             globalWhatsAppManager.recordMessageSent(selectedId);
             return sent;
         }
@@ -497,11 +509,9 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
 
                 if (!text && !hasMedia) continue;
 
-                // Read receipt
-                if (msg.key.id && typeof sock.readMessages === 'function') {
-                    try {
-                        await sock.readMessages([msg.key]);
-                    } catch {}
+                // Track incoming unreplied message key (DO NOT mark as read yet, only when replied!)
+                if (msg.key?.id) {
+                    unrepliedMessageKeys.set(jid, msg.key);
                 }
 
                 // Sticky session assignment
@@ -591,6 +601,14 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                                         await saveMessage(jid, 'assistant', welcomeText, 'bot', sent?.key?.id || undefined);
                                         await markCustomerGreeted(jid, sock);
 
+                                        // Mark incoming customer message as read (centang biru 2) now that it is replied!
+                                        if (msg.key && typeof (sock as any).readMessages === 'function') {
+                                            try {
+                                                await (sock as any).readMessages([msg.key]);
+                                                unrepliedMessageKeys.delete(jid);
+                                            } catch {}
+                                        }
+
                                         if (runtimeSessionId !== 'legacy' && runtimeSessionId !== 'pending') {
                                             globalWhatsAppManager.recordMessageSent(runtimeSessionId);
                                         }
@@ -598,7 +616,7 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                                     }
                                 );
                             } else {
-                                await markCustomerGreeted(jid, sock);
+                                // DO NOT mark as greeted when skipped!
                                 appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.greeting_skipped_conditions_not_met');
                             }
                         } catch (err) {

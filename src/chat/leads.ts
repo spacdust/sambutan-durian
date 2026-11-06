@@ -212,30 +212,7 @@ export const shouldCustomerBeGreeted = async (jid: string, sock?: any): Promise<
             return false;
         }
 
-        // 2. Check if user has established tctoken in auth_keys (conversations that already existed on WhatsApp)
-        const userPart = jid.replace(/@.*$/, '');
-        const phonePart = cleanPhone || '';
-        try {
-            const authCheck = await pool.query(
-                `SELECT 1 FROM auth_keys 
-                 WHERE id LIKE '%tctoken-' || $1 || '%'
-                    OR ($2 != '' AND id LIKE '%tctoken-' || $2 || '%')
-                 LIMIT 1`,
-                [userPart, phonePart]
-            );
-            if (authCheck.rows.length > 0) {
-                await recordExistingContact({
-                    id: cleanPhone || userPart,
-                    phone: cleanPhone,
-                    jid: phoneJid,
-                    lid: lidJid,
-                    source: 'auth_tctoken'
-                });
-                return false;
-            }
-        } catch {}
-
-        // 3. Check if lead is marked as already greeted or status = 'existing'
+        // 2. Check if lead is marked as already greeted or status = 'existing'
         const leadCheck = await pool.query(
             `SELECT status, greeted_at FROM leads 
              WHERE jid = $1 
@@ -318,7 +295,7 @@ export const markCustomerGreeted = async (jid: string, sock?: any): Promise<void
 
 export const deleteLeadCompletely = async (jid: string): Promise<void> => {
     try {
-        const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid);
+        const { cleanPhone, candidateJids } = await resolveContactJids(jid);
 
         // 1. Delete from leads table (removes from UI table list)
         for (const cJid of candidateJids) {
@@ -333,14 +310,13 @@ export const deleteLeadCompletely = async (jid: string): Promise<void> => {
             await pool.query('DELETE FROM chat_history WHERE jid = $1', [cJid]);
         }
 
-        // 3. Permanently record in existing_contacts so the bot NEVER greets them if they chat again
-        await recordExistingContact({
-            id: cleanPhone || jid,
-            phone: cleanPhone,
-            jid: phoneJid,
-            lid: lidJid,
-            source: 'deleted_lead'
-        });
+        // 3. Delete from existing_contacts table so testing / fresh chat can work
+        for (const cJid of candidateJids) {
+            await pool.query('DELETE FROM existing_contacts WHERE id = $1 OR jid = $1 OR lid = $1', [cJid]);
+        }
+        if (cleanPhone) {
+            await pool.query('DELETE FROM existing_contacts WHERE phone = $1 OR id = $1', [cleanPhone]);
+        }
 
         // 4. Emit deletion events so active UI instantly updates
         for (const cJid of candidateJids) {
@@ -356,25 +332,28 @@ export const deleteLeadCompletely = async (jid: string): Promise<void> => {
     }
 };
 
-export const syncExistingContactsFromAuth = async (): Promise<void> => {
+export const resetCustomerGreeting = async (jid: string): Promise<void> => {
     try {
-        const { rows } = await pool.query(
-            "SELECT id FROM auth_keys WHERE id LIKE '%tctoken-%'"
-        );
-        for (const r of rows) {
-            const idStr = String(r.id || '');
-            if (idStr.includes('__index')) continue;
-            const target = idStr.split('tctoken-')[1] || '';
-            if (!target) continue;
-
-            const info = await resolveContactJids(target);
-            await recordExistingContact({
-                id: info.cleanPhone || target,
-                phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
-                jid: info.phoneJid,
-                lid: info.lidJid,
-                source: 'auth_tctoken'
-            });
+        const { cleanPhone, candidateJids } = await resolveContactJids(jid);
+        for (const cJid of candidateJids) {
+            await pool.query("UPDATE leads SET greeted_at = NULL, status = 'new' WHERE jid = $1", [cJid]);
+            await pool.query('DELETE FROM existing_contacts WHERE id = $1 OR jid = $1 OR lid = $1', [cJid]);
+            await pool.query("DELETE FROM chat_history WHERE jid = $1 AND sender_type = 'bot'", [cJid]);
         }
-    } catch {}
+        if (cleanPhone) {
+            await pool.query("UPDATE leads SET greeted_at = NULL, status = 'new' WHERE phone = $1", [cleanPhone]);
+            await pool.query('DELETE FROM existing_contacts WHERE phone = $1 OR id = $1', [cleanPhone]);
+        }
+        for (const cJid of candidateJids) {
+            try {
+                chatEvents.emit('update', { jid: cJid });
+            } catch {}
+        }
+    } catch (err) {
+        throw err;
+    }
+};
+
+export const syncExistingContactsFromAuth = async (): Promise<void> => {
+    // No-op: do not auto-block all historical keys, let history_sync handle real phone chats
 };
