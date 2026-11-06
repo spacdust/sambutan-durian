@@ -1,5 +1,6 @@
 import { pool } from '../config/db.js';
 import { chatEvents } from './history.js';
+import { getBusinessConfig } from '../config/business.js';
 
 export interface Lead {
     jid: string;
@@ -182,7 +183,7 @@ export const upsertLead = async (lead: Lead) => {
         const info = await resolveContactJids(lead.jid);
         const searchPhone = (lead.phone || info.cleanPhone || '').replace(/:\d+$/, '');
         const existing = await pool.query(
-            `SELECT 1 FROM existing_contacts 
+            `SELECT source FROM existing_contacts 
              WHERE (id = $1 
                 OR jid = $1 
                 OR lid = $1 
@@ -194,8 +195,30 @@ export const upsertLead = async (lead: Lead) => {
             [lead.jid, searchPhone, info.phoneJid || '', info.lidJid || '']
         );
         if (existing.rows.length > 0) {
-            lead.status = 'existing';
-            lead.greeted_at = new Date().toISOString();
+            const bizConfig = getBusinessConfig();
+            const ignoreCtwa = bizConfig.ignoreCtwaGreeting ?? true;
+            let markExisting = true;
+
+            if (ignoreCtwa && existing.rows[0].source !== 'greeted' && existing.rows[0].source !== 'quoted_old_chat') {
+                // If ignoreCtwaGreeting is enabled, check if this contact only has salam_otomatis (or no bot/admin greeting yet)
+                const candidateJids = info.candidateJids;
+                const hasBotOrAdmin = await pool.query(
+                    `SELECT 1 FROM chat_history 
+                     WHERE jid IN (${candidateJids.map((_, i) => `$${i + 1}`).join(',')}) 
+                       AND role = 'assistant' 
+                       AND sender_type IN ('bot', 'admin') 
+                     LIMIT 1`,
+                    candidateJids
+                );
+                if (hasBotOrAdmin.rows.length === 0) {
+                    markExisting = false;
+                }
+            }
+
+            if (markExisting) {
+                lead.status = 'existing';
+                lead.greeted_at = new Date().toISOString();
+            }
         }
     }
 
@@ -241,12 +264,53 @@ export const getLead = async (jid: string): Promise<Lead | null> => {
 export const shouldCustomerBeGreeted = async (jid: string, sock?: any): Promise<boolean> => {
     try {
         const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid, sock);
+        const bizConfig = getBusinessConfig();
+        const ignoreCtwa = bizConfig.ignoreCtwaGreeting ?? true;
 
-        // 1. Check if number/JID has prior conversation history on WhatsApp before bot was run
-        // Only real WhatsApp phone history ('history_sync_chat', 'history_sync_msg', 'quoted_old_chat') blocks greetings.
+        // 1. Check if Sambutan Durian bot has EVER sent a greeting to any candidate JIDs
+        // Buffer rule: Bot only sends maximum 1 greeting!
+        for (const cJid of candidateJids) {
+            const botHistory = await pool.query(
+                "SELECT 1 FROM chat_history WHERE jid = $1 AND sender_type = 'bot' LIMIT 1",
+                [cJid]
+            );
+            if (botHistory.rows.length > 0) return false;
+        }
+
+        // 2. Check if a human CS has already manually replied
+        // Human replies (sender_type = 'admin') take precedence; automated greetings ('salam_otomatis') do NOT block.
+        for (const cJid of candidateJids) {
+            const humanReply = await pool.query(
+                "SELECT 1 FROM chat_history WHERE jid = $1 AND role = 'assistant' AND sender_type = 'admin' LIMIT 1",
+                [cJid]
+            );
+            if (humanReply.rows.length > 0) return false;
+        }
+
+        // 3. Buffer check for Salam Otomatis Iklan:
+        // When ignoreCtwa is true, we allow at most 1 salam_otomatis (greeting #1) + 1 bot greeting (greeting #2).
+        // If there are already 2 or more salam_otomatis, buffer is exceeded.
+        // If ignoreCtwa is false, any prior salam_otomatis blocks further greetings.
+        let salamOtomatisCount = 0;
+        for (const cJid of candidateJids) {
+            const res = await pool.query(
+                "SELECT COUNT(*) as count FROM chat_history WHERE jid = $1 AND sender_type = 'salam_otomatis'",
+                [cJid]
+            );
+            salamOtomatisCount += Number(res.rows[0]?.count || 0);
+        }
+        if (!ignoreCtwa && salamOtomatisCount > 0) {
+            return false;
+        }
+        if (ignoreCtwa && salamOtomatisCount >= 2) {
+            return false;
+        }
+
+        // 4. Check if number/JID has prior conversation history on WhatsApp before bot was run
+        // Only real WhatsApp phone history ('history_sync_chat', 'history_sync_msg', 'quoted_old_chat', 'greeted') blocks greetings.
         // NOTE: 'history_sync_contact' (address book without chat history) DOES NOT block greeting.
         const existingCheck = await pool.query(
-            `SELECT 1 FROM existing_contacts 
+            `SELECT source FROM existing_contacts 
              WHERE (id = $1 
                 OR jid = $1 
                 OR lid = $1 
@@ -258,10 +322,16 @@ export const shouldCustomerBeGreeted = async (jid: string, sock?: any): Promise<
             [jid, cleanPhone || '', phoneJid || '', lidJid || '']
         );
         if (existingCheck.rows.length > 0) {
-            return false;
+            const source = existingCheck.rows[0].source;
+            if (source === 'greeted' || source === 'quoted_old_chat') {
+                return false;
+            }
+            if (!ignoreCtwa) {
+                return false;
+            }
         }
 
-        // 2. Check if lead is marked as already greeted or status = 'existing'
+        // 5. Check if lead is marked as already greeted or status = 'existing'
         const leadCheck = await pool.query(
             `SELECT status, greeted_at FROM leads 
              WHERE jid = $1 
@@ -274,29 +344,10 @@ export const shouldCustomerBeGreeted = async (jid: string, sock?: any): Promise<
         const lead = leadCheck.rows[0];
         if (lead) {
             if (lead.greeted_at) return false;
-            if (lead.status === 'existing') return false;
+            if (lead.status === 'existing' && !ignoreCtwa) return false;
         }
 
-        // 3. Check if Sambutan Durian bot has EVER sent a greeting to any of the candidate JIDs
-        for (const cJid of candidateJids) {
-            const botHistory = await pool.query(
-                "SELECT 1 FROM chat_history WHERE jid = $1 AND sender_type = 'bot' LIMIT 1",
-                [cJid]
-            );
-            if (botHistory.rows.length > 0) return false;
-        }
-
-        // 4. Check if a human CS has already manually replied
-        // Only actual human replies count (sender_type = 'admin'), excluding automated greetings (sender_type = 'salam_otomatis')
-        for (const cJid of candidateJids) {
-            const humanReply = await pool.query(
-                "SELECT 1 FROM chat_history WHERE jid = $1 AND role = 'assistant' AND sender_type = 'admin' LIMIT 1",
-                [cJid]
-            );
-            if (humanReply.rows.length > 0) return false;
-        }
-
-        // 5. Check if customer sent messages in an older session (more than 15 minutes ago)
+        // 6. Check if customer sent messages in an older session (more than 15 minutes ago)
         // If there are customer messages older than 15 minutes that were never replied to, this is an old contact / conversation from earlier days.
         const now = Date.now();
         for (const cJid of candidateJids) {
@@ -317,7 +368,7 @@ export const shouldCustomerBeGreeted = async (jid: string, sock?: any): Promise<
 
         // Passed all exclusion criteria:
         // 1. Nomor baru yang baru chat dan belum pernah dibalas
-        // 2. Nomor baru yang baru chat + pesan salam otomatis
+        // 2. Nomor baru yang baru chat + pesan salam otomatis (buffer maksimal 2 chat sambutan)
         return true;
     } catch {
         return false;

@@ -12,6 +12,7 @@ export interface BusinessConfig {
     offHoursStart?: string;
     offHoursEnd?: string;
     offHoursMessage?: string;
+    ignoreCtwaGreeting?: boolean;
 }
 
 const DEFAULT_CONFIG: BusinessConfig = {
@@ -25,6 +26,7 @@ const DEFAULT_CONFIG: BusinessConfig = {
     offHoursStart: '21:00',
     offHoursEnd: '08:00',
     offHoursMessage: 'Halo kak {{nama}}! Terima kasih sudah menghubungi Sambutan Durian 🍈 Saat ini kami sedang di luar jam kerja (toko tutup). Pesan kakak sudah kami terima dan akan segera kami balas saat jam operasional kembali aktif. Terima kasih atas pengertiannya! 🙏',
+    ignoreCtwaGreeting: true,
 };
 
 export const isCurrentTimeWithinOffHours = (

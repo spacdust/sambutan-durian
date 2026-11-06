@@ -410,6 +410,7 @@ export const api = {
         offHoursStart: string;
         offHoursEnd: string;
         offHoursMessage: string;
+        ignoreCtwaGreeting: boolean;
         isCurrentlyOffHours: boolean;
       }>('/admin/api/settings'),
     updateConfig: (data: {
@@ -423,6 +424,7 @@ export const api = {
       offHoursStart?: string;
       offHoursEnd?: string;
       offHoursMessage?: string;
+      ignoreCtwaGreeting?: boolean;
     }) =>
       apiRequest<{ ok: boolean }>('/admin/api/settings', {
         method: 'POST',

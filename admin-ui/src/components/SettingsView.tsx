@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Clock,
   Moon,
+  Megaphone,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
@@ -32,6 +33,7 @@ export const SettingsView: React.FC = () => {
   const [offHoursEnd, setOffHoursEnd] = useState('08:00');
   const [offHoursMessage, setOffHoursMessage] = useState('Halo kak {{nama}}! Terima kasih sudah menghubungi Sambutan Durian 🍈 Saat ini kami sedang di luar jam kerja (toko tutup). Pesan kakak sudah kami terima dan akan segera kami balas saat jam operasional kembali aktif. Terima kasih atas pengertiannya! 🙏');
   const [isCurrentlyOffHours, setIsCurrentlyOffHours] = useState(false);
+  const [ignoreCtwaGreeting, setIgnoreCtwaGreeting] = useState(true);
   const [adminPhone, setAdminPhone] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [loading, setLoading] = useState(true);
@@ -55,6 +57,7 @@ export const SettingsView: React.FC = () => {
         setOffHoursEnd(res.offHoursEnd || '08:00');
         setOffHoursMessage(res.offHoursMessage || 'Halo kak {{nama}}! Terima kasih sudah menghubungi Sambutan Durian 🍈 Saat ini kami sedang di luar jam kerja (toko tutup). Pesan kakak sudah kami terima dan akan segera kami balas saat jam operasional kembali aktif. Terima kasih atas pengertiannya! 🙏');
         setIsCurrentlyOffHours(res.isCurrentlyOffHours ?? false);
+        setIgnoreCtwaGreeting(res.ignoreCtwaGreeting ?? true);
         setAdminPhone(res.adminPhone || '');
       }
     } catch (err) {
@@ -77,6 +80,7 @@ export const SettingsView: React.FC = () => {
         offHoursStart,
         offHoursEnd,
         offHoursMessage,
+        ignoreCtwaGreeting,
         adminPhone,
         ...(newPassword ? { password: newPassword } : {}),
       });
@@ -264,6 +268,26 @@ export const SettingsView: React.FC = () => {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* CTWA Ad Greeting Buffer Toggle */}
+            <div className="flex items-center justify-between p-3.5 rounded-xl border bg-muted/20">
+              <div className="space-y-0.5 pr-4">
+                <div className="text-xs font-semibold text-foreground flex items-center gap-2">
+                  <Megaphone size={14} className="text-amber-500" />
+                  <span>Abaikan Salam Otomatis Iklan</span>
+                  <Badge variant={ignoreCtwaGreeting ? 'success' : 'secondary'} className="text-[10px]">
+                    {ignoreCtwaGreeting ? '● Aktif (Buffer 2 Pesan)' : '○ Nonaktif'}
+                  </Badge>
+                </div>
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  Khusus nomor WhatsApp Business dengan iklan Facebook/Instagram (CTWA) yang mengirim salam otomatis duluan saat lead masuk. Bot menganggap riwayat chat masih kosong sehingga tetap membalas 1x pesan sambutan ketika customer membalas (buffer maksimal 2 chat sambutan).
+                </p>
+              </div>
+              <Switch
+                checked={ignoreCtwaGreeting}
+                onCheckedChange={setIgnoreCtwaGreeting}
+              />
             </div>
 
             <div className="space-y-1.5">

@@ -49,6 +49,7 @@ const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const generations = new Map<string, number>();
 const perNumberOutboundQueue = new PerNumberQueue();
 const greetingInProgress = new Set<string>();
+const sentBotMessageIds = new Set<string>();
 export const unrepliedMessageKeys = new Map<string, any>();
 
 export const selectOutboundSessionId = (jid: string, onlineSessionIds: string[]) => {
@@ -311,6 +312,40 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 messageCount: messages?.length || 0
             }, 'whatsapp.history_sync_received');
 
+            const bizConfig = getBusinessConfig();
+            const ignoreCtwa = bizConfig.ignoreCtwaGreeting ?? true;
+
+            // Group historical messages by remoteJid
+            const messagesByJid = new Map<string, any[]>();
+            for (const msg of messages || []) {
+                const rJid = msg.key?.remoteJid;
+                if (!rJid) continue;
+                const list = messagesByJid.get(rJid) || [];
+                list.push(msg);
+                messagesByJid.set(rJid, list);
+
+                // If this is an outgoing message, check if it's a salam otomatis or ad greeting
+                if (msg.key?.fromMe) {
+                    const rawContent = normalizeMessageContent(msg.message);
+                    const contextInfo = (rawContent as any)?.extendedTextMessage?.contextInfo
+                        || (rawContent as any)?.contextInfo;
+                    const isAdOrCtwa = Boolean(
+                        contextInfo?.externalAdReply ||
+                        contextInfo?.quotedAd ||
+                        contextInfo?.entryPointConversionApp ||
+                        contextInfo?.entryPointConversionSource ||
+                        contextInfo?.ctwaClid ||
+                        contextInfo?.ctwaSignals
+                    );
+                    if (isAdOrCtwa) {
+                        try {
+                            const text = (rawContent?.conversation || (rawContent as any)?.extendedTextMessage?.text || (rawContent as any)?.imageMessage?.caption || '').trim();
+                            await saveMessage(rJid, 'assistant', text || '[Iklan Facebook]', 'salam_otomatis', msg.key?.id || undefined);
+                        } catch {}
+                    }
+                }
+            }
+
             // 1. Process chats
             for (const chat of chats || []) {
                 const chatId = chat.id;
@@ -319,6 +354,18 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 }
                 const isUserChat = chatId.endsWith('@s.whatsapp.net') || chatId.endsWith('@lid');
                 if (!isUserChat) continue;
+
+                // Check if this chat only contains an outgoing CTWA / salam otomatis message
+                const chatMsgs = messagesByJid.get(chatId) || [];
+                const incomingCount = chatMsgs.filter((m: any) => !m.key?.fromMe).length;
+                const hasOutgoingOnly = chatMsgs.length > 0 && incomingCount === 0;
+
+                if (ignoreCtwa && hasOutgoingOnly) {
+                    // This is a CTWA ad lead where WhatsApp Business sent salam otomatis, but the customer hasn't chatted yet!
+                    // Do NOT mark as an old conversation, so bot will greet when customer sends their first message.
+                    appLogger.info({ component: 'whatsapp', chatId }, 'whatsapp.history_sync_skipped_ctwa_lead');
+                    continue;
+                }
 
                 try {
                     const info = await resolveContactJids(chatId, sock);
@@ -359,6 +406,12 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
             for (const msg of messages || []) {
                 const rJid = msg.key?.remoteJid;
                 if (!rJid || rJid.endsWith('@g.us') || rJid.endsWith('@broadcast') || rJid.endsWith('@newsletter')) continue;
+
+                // If it's an outgoing message and ignoreCtwa is true, do not block contact as history_sync_msg
+                if (ignoreCtwa && msg.key?.fromMe) {
+                    continue;
+                }
+
                 try {
                     const info = await resolveContactJids(rJid, sock);
                     await recordExistingContact({
@@ -447,6 +500,12 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 // Handle messages sent from our own account (manual CS reply or automated salam/ad greeting)
                 if (msg.key.fromMe) {
                     if (text || hasMedia) {
+                        const isSentByBot = msg.key?.id ? sentBotMessageIds.has(msg.key.id) : false;
+                        if (isSentByBot) {
+                            // Already handled & recorded when dispatched by our bot, avoid duplicating as manual CS
+                            continue;
+                        }
+
                         const contextInfo = (rawContent as any)?.extendedTextMessage?.contextInfo
                             || (msg.message as any)?.extendedTextMessage?.contextInfo
                             || (rawContent as any)?.contextInfo
@@ -461,10 +520,14 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                             contextInfo?.ctwaSignals
                         );
 
-                        // Check if the customer has ever sent a message in this chat
+                        // Check if the customer has ever sent a message across candidate JIDs
+                        const { candidateJids } = await resolveContactJids(jid, sock);
                         const userHistory = await pool.query(
-                            "SELECT 1 FROM chat_history WHERE jid = $1 AND role = 'user' LIMIT 1",
-                            [jid]
+                            `SELECT 1 FROM chat_history 
+                             WHERE jid IN (${candidateJids.map((_, i) => `$${i + 1}`).join(',')}) 
+                               AND role = 'user' 
+                             LIMIT 1`,
+                            candidateJids
                         );
                         const hasCustomerSpoken = userHistory.rows.length > 0;
 
@@ -588,6 +651,13 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
 
                                         try {
                                             const sent = await sock.sendMessage(jid, { text: welcomeText });
+                                            if (sent?.key?.id) {
+                                                sentBotMessageIds.add(sent.key.id);
+                                                if (sentBotMessageIds.size > 2000) {
+                                                    const oldest = Array.from(sentBotMessageIds).slice(0, 500);
+                                                    for (const id of oldest) sentBotMessageIds.delete(id);
+                                                }
+                                            }
                                             await saveMessage(jid, 'assistant', welcomeText, 'bot', sent?.key?.id || undefined);
                                             await markCustomerGreeted(jid, sock);
 

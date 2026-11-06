@@ -535,6 +535,7 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
             offHoursStart: config.offHoursStart || '21:00',
             offHoursEnd: config.offHoursEnd || '08:00',
             offHoursMessage: config.offHoursMessage || '',
+            ignoreCtwaGreeting: config.ignoreCtwaGreeting ?? true,
             isCurrentlyOffHours,
         });
     });
@@ -552,6 +553,7 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
                 offHoursStart,
                 offHoursEnd,
                 offHoursMessage,
+                ignoreCtwaGreeting,
             } = req.body;
             const updates: any = {};
             if (businessName) updates.businessName = String(businessName).trim();
@@ -563,6 +565,7 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
             if (offHoursStart !== undefined) updates.offHoursStart = String(offHoursStart).trim();
             if (offHoursEnd !== undefined) updates.offHoursEnd = String(offHoursEnd).trim();
             if (offHoursMessage !== undefined) updates.offHoursMessage = String(offHoursMessage).trim();
+            if (ignoreCtwaGreeting !== undefined) updates.ignoreCtwaGreeting = Boolean(ignoreCtwaGreeting);
 
             updateBusinessConfig(updates);
 
