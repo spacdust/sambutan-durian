@@ -138,8 +138,8 @@ export const App: React.FC = () => {
         {/* Brand Header */}
         <div className="p-4 px-5 border-b flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 p-1 flex items-center justify-center shadow-xs overflow-hidden shrink-0 text-xl">
-              🍈
+            <div className="w-10 h-10 rounded-xl border border-amber-500/30 p-0.5 flex items-center justify-center shadow-xs overflow-hidden shrink-0 bg-amber-500/10">
+              <img src="/app/logo.jpg" alt="Logo" className="w-full h-full object-cover rounded-lg" />
             </div>
             <div className="flex flex-col">
               <span className="font-semibold text-sm tracking-tight leading-none text-foreground flex items-center gap-1.5">
@@ -189,8 +189,8 @@ export const App: React.FC = () => {
         <div className="p-3 border-t bg-card/40 space-y-2">
           <div className="flex items-center justify-between px-2.5 py-2 rounded-lg bg-muted/40 border text-xs">
             <div className="flex items-center gap-2.5 overflow-hidden">
-              <div className="w-7 h-7 rounded-full bg-primary/15 text-primary flex items-center justify-center font-bold text-[11px] shrink-0 border border-primary/20">
-                SD
+              <div className="w-7 h-7 rounded-full overflow-hidden shrink-0 border border-primary/20">
+                <img src="/app/logo.jpg" alt="Logo" className="w-full h-full object-cover" />
               </div>
               <div className="truncate">
                 <div className="font-semibold truncate text-xs text-foreground">Admin</div>
@@ -214,7 +214,7 @@ export const App: React.FC = () => {
         <header className="sticky top-0 z-20 h-14 border-b bg-background/80 backdrop-blur-md px-6 md:px-8 flex items-center justify-between">
           {/* Breadcrumb */}
           <div className="flex items-center gap-2.5 text-xs text-muted-foreground font-medium">
-            <span className="text-lg">🍈</span>
+            <img src="/app/logo.jpg" alt="Logo" className="w-5 h-5 rounded-md object-cover shrink-0" />
             <span>{businessName}</span>
             <ChevronRight size={13} className="text-muted-foreground/60" />
             <span className="text-foreground font-semibold flex items-center gap-1.5">

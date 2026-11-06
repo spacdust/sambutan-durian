@@ -41,8 +41,8 @@ export const LoginView: React.FC<{ onLoginSuccess: (session: SessionInfo) => voi
 
       <Card className="w-full max-w-md shadow-xl border-border bg-card text-card-foreground">
         <CardHeader className="text-center pb-4 pt-8">
-          <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 dark:bg-emerald-950/40 border border-emerald-500/20 flex items-center justify-center mx-auto mb-3.5 shadow-md text-3xl">
-            🍈
+          <div className="w-20 h-20 rounded-2xl border border-amber-500/30 p-1 flex items-center justify-center mx-auto mb-3.5 shadow-md overflow-hidden bg-amber-500/10">
+            <img src="/app/logo.jpg" alt="Logo" className="w-full h-full object-cover rounded-xl" />
           </div>
           <CardTitle className="text-xl font-bold tracking-tight text-foreground">
             Sambutan Durian

@@ -24,7 +24,7 @@ export const renderLoginPage = (error = '', nonce = '') => `<!doctype html>
 <body>
   <div class="card">
     <div class="head">
-      <div class="icon">🍈</div>
+      <img src="/app/logo.jpg" alt="Logo" style="width:64px;height:64px;border-radius:14px;object-fit:cover;margin:0 auto 10px;display:block;border:1px solid rgba(245,158,11,0.3)">
       <h1>Sambutan Durian</h1>
       <p>Masuk ke portal web admin WhatsApp</p>
     </div>
