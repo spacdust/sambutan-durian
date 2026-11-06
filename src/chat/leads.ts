@@ -159,7 +159,11 @@ export const recordExistingContact = async (data: {
                  phone = COALESCE(existing_contacts.phone, EXCLUDED.phone),
                  jid = COALESCE(existing_contacts.jid, EXCLUDED.jid),
                  lid = COALESCE(existing_contacts.lid, EXCLUDED.lid),
-                 name = COALESCE(existing_contacts.name, EXCLUDED.name)`,
+                 name = COALESCE(existing_contacts.name, EXCLUDED.name),
+                 source = CASE 
+                     WHEN EXCLUDED.source IN ('history_sync_chat', 'greeted', 'quoted_old_chat') THEN EXCLUDED.source 
+                     ELSE existing_contacts.source 
+                 END`,
             [id, rawPhone || null, data.jid ? data.jid.replace(/:\d+@/, '@') : null, data.lid ? data.lid.replace(/:\d+@/, '@') : null, data.name || null, data.source || 'history_sync']
         );
     } catch {}
@@ -170,6 +174,28 @@ export const upsertLead = async (lead: Lead) => {
         const info = await resolveContactJids(lead.jid);
         if (info.cleanPhone && !info.cleanPhone.includes('@')) {
             lead.phone = info.cleanPhone.replace(/:\d+$/, '');
+        }
+    }
+
+    // If this contact is already an existing contact in WhatsApp Business, ensure it is not marked as a fresh un-greeted lead
+    if (!lead.greeted_at) {
+        const info = await resolveContactJids(lead.jid);
+        const searchPhone = (lead.phone || info.cleanPhone || '').replace(/:\d+$/, '');
+        const existing = await pool.query(
+            `SELECT 1 FROM existing_contacts 
+             WHERE (id = $1 
+                OR jid = $1 
+                OR lid = $1 
+                OR ($2 != '' AND (phone = $2 OR id = $2 OR phone LIKE $2 || ':%' OR id LIKE $2 || ':%'))
+                OR ($3 != '' AND (jid = $3 OR id = $3))
+                OR ($4 != '' AND (lid = $4 OR id = $4)))
+               AND source IN ('history_sync_chat', 'history_sync_msg', 'greeted', 'quoted_old_chat')
+             LIMIT 1`,
+            [lead.jid, searchPhone, info.phoneJid || '', info.lidJid || '']
+        );
+        if (existing.rows.length > 0) {
+            lead.status = 'existing';
+            lead.greeted_at = new Date().toISOString();
         }
     }
 
@@ -227,7 +253,7 @@ export const shouldCustomerBeGreeted = async (jid: string, sock?: any): Promise<
                 OR ($2 != '' AND (phone = $2 OR id = $2 OR phone LIKE $2 || ':%' OR id LIKE $2 || ':%'))
                 OR ($3 != '' AND (jid = $3 OR id = $3))
                 OR ($4 != '' AND (lid = $4 OR id = $4)))
-               AND source IN ('history_sync_chat', 'history_sync_msg', 'quoted_old_chat')
+               AND source IN ('history_sync_chat', 'history_sync_msg', 'quoted_old_chat', 'greeted')
              LIMIT 1`,
             [jid, cleanPhone || '', phoneJid || '', lidJid || '']
         );
@@ -304,12 +330,28 @@ export const hasCustomerBeenGreeted = async (jid: string, sock?: any): Promise<b
 
 export const markCustomerGreeted = async (jid: string, sock?: any): Promise<void> => {
     try {
-        const { cleanPhone, candidateJids } = await resolveContactJids(jid, sock);
+        const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid, sock);
         for (const cJid of candidateJids) {
-            await pool.query('UPDATE leads SET greeted_at = CURRENT_TIMESTAMP WHERE jid = $1', [cJid]);
+            await pool.query("UPDATE leads SET greeted_at = CURRENT_TIMESTAMP, status = 'existing' WHERE jid = $1", [cJid]);
         }
         if (cleanPhone) {
-            await pool.query("UPDATE leads SET greeted_at = CURRENT_TIMESTAMP WHERE phone = $1 OR phone LIKE $1 || ':%'", [cleanPhone]);
+            await pool.query("UPDATE leads SET greeted_at = CURRENT_TIMESTAMP, status = 'existing' WHERE phone = $1 OR phone LIKE $1 || ':%'", [cleanPhone]);
+            await recordExistingContact({
+                id: cleanPhone,
+                phone: cleanPhone,
+                jid: phoneJid,
+                lid: lidJid,
+                source: 'greeted'
+            });
+        }
+        if (lidJid) {
+            await recordExistingContact({
+                id: lidJid,
+                phone: cleanPhone,
+                jid: phoneJid,
+                lid: lidJid,
+                source: 'greeted'
+            });
         }
     } catch {}
 };
@@ -331,15 +373,12 @@ export const deleteLeadCompletely = async (jid: string): Promise<void> => {
             await pool.query('DELETE FROM chat_history WHERE jid = $1', [cJid]);
         }
 
-        // 3. Clear greeted or quoted_old_chat records, while keeping real phone sync history (history_sync_chat)
-        for (const cJid of candidateJids) {
-            await pool.query("DELETE FROM existing_contacts WHERE (id = $1 OR jid = $1 OR lid = $1) AND source IN ('greeted', 'quoted_old_chat', 'deleted_lead')", [cJid]);
-        }
-        if (cleanPhone) {
-            await pool.query("DELETE FROM existing_contacts WHERE (phone = $1 OR id = $1 OR phone LIKE $1 || ':%' OR id LIKE $1 || ':%') AND source IN ('greeted', 'quoted_old_chat', 'deleted_lead')", [cleanPhone]);
-        }
+        // NOTE: We do NOT delete from existing_contacts here!
+        // Deleting from the bot dashboard does NOT delete the chat on WhatsApp Business phone.
+        // As long as the chat still exists in WhatsApp Business, keeping existing_contacts intact
+        // ensures the bot will NOT send automated greetings to an existing chat.
 
-        // 4. Emit deletion events so active UI instantly updates
+        // 3. Emit deletion events so active UI instantly updates
         for (const cJid of candidateJids) {
             try {
                 chatEvents.emit('chat_cleared', { jid: cJid });
