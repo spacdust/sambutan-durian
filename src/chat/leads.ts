@@ -269,13 +269,19 @@ export const shouldCustomerBeGreeted = async (jid: string, sock?: any): Promise<
 
         // 5. Check if customer sent messages in an older session (more than 15 minutes ago)
         // If there are customer messages older than 15 minutes that were never replied to, this is an old contact / conversation from earlier days.
-        const cutoffTime = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+        const now = Date.now();
         for (const cJid of candidateJids) {
-            const oldCustomerMsg = await pool.query(
-                "SELECT 1 FROM chat_history WHERE jid = $1 AND role = 'user' AND created_at < $2 LIMIT 1",
-                [cJid, cutoffTime]
+            const userMessages = await pool.query(
+                "SELECT created_at FROM chat_history WHERE jid = $1 AND role = 'user'",
+                [cJid]
             );
-            if (oldCustomerMsg.rows.length > 0) {
+            const hasOldSessionMessage = userMessages.rows.some((row) => {
+                if (!row.created_at) return false;
+                const msgTime = new Date(row.created_at).getTime();
+                if (Number.isNaN(msgTime)) return false;
+                return (now - msgTime) > (15 * 60 * 1000);
+            });
+            if (hasOldSessionMessage) {
                 return false;
             }
         }
