@@ -21,7 +21,7 @@ import { globalWhatsAppManager } from './whatsapp-manager.js';
 import { calculateRandomDelayMs, calculateTypingDurationMs } from './anti-ban-delay.js';
 import { PerNumberQueue } from './per-number-queue.js';
 import { appLogger } from '../config/logger.js';
-import { upsertLead, hasCustomerBeenGreeted, shouldCustomerBeGreeted, markCustomerGreeted, resolveContactJids, recordExistingContact } from '../chat/leads.js';
+import { upsertLead, hasCustomerBeenGreeted, shouldCustomerBeGreeted, markCustomerGreeted, resolveContactJids, recordExistingContact, deleteLeadCompletely, resetCustomerGreeting } from '../chat/leads.js';
 import { saveMessage, getChatHistory } from '../chat/history.js';
 import { pool } from '../config/db.js';
 import { getBotRuntimeControl } from './bot-runtime-control.js';
@@ -368,6 +368,17 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                         lid: info.lidJid || (rJid.endsWith('@lid') ? rJid : undefined),
                         source: 'history_sync_msg'
                     });
+                } catch {}
+            }
+        });
+
+        // When user deletes a chat on WhatsApp Business phone, automatically clear the lead & reset greeting
+        sock.ev.on('chats.delete', async (chatIds: string[]) => {
+            for (const chatId of chatIds || []) {
+                try {
+                    await deleteLeadCompletely(chatId);
+                    await resetCustomerGreeting(chatId);
+                    appLogger.info({ component: 'whatsapp', chatId }, 'whatsapp.chat_deleted_on_phone');
                 } catch {}
             }
         });
