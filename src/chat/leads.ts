@@ -216,15 +216,18 @@ export const shouldCustomerBeGreeted = async (jid: string, sock?: any): Promise<
     try {
         const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid, sock);
 
-        // 1. Check if number/JID is in existing_contacts (synced from WhatsApp phone history, previous conversation, greeted, or deleted lead)
+        // 1. Check if number/JID has prior conversation history on WhatsApp (synced on startup) or was already greeted
+        // NOTE: We only check real chat history ('history_sync_chat', 'history_sync_msg', 'greeted', 'quoted_old_chat').
+        // 'history_sync_contact' (contacts saved in phone address book without chat history) DOES NOT block greeting.
         const existingCheck = await pool.query(
             `SELECT 1 FROM existing_contacts 
-             WHERE id = $1 
+             WHERE (id = $1 
                 OR jid = $1 
                 OR lid = $1 
                 OR ($2 != '' AND (phone = $2 OR id = $2 OR phone LIKE $2 || ':%' OR id LIKE $2 || ':%'))
                 OR ($3 != '' AND (jid = $3 OR id = $3))
-                OR ($4 != '' AND (lid = $4 OR id = $4))
+                OR ($4 != '' AND (lid = $4 OR id = $4)))
+               AND source IN ('history_sync_chat', 'history_sync_msg', 'greeted', 'quoted_old_chat')
              LIMIT 1`,
             [jid, cleanPhone || '', phoneJid || '', lidJid || '']
         );
@@ -319,7 +322,7 @@ export const markCustomerGreeted = async (jid: string, sock?: any): Promise<void
 
 export const deleteLeadCompletely = async (jid: string): Promise<void> => {
     try {
-        const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid);
+        const { cleanPhone, candidateJids } = await resolveContactJids(jid);
 
         // 1. Delete from leads table (removes from UI table list)
         for (const cJid of candidateJids) {
@@ -334,17 +337,7 @@ export const deleteLeadCompletely = async (jid: string): Promise<void> => {
             await pool.query('DELETE FROM chat_history WHERE jid = $1', [cJid]);
         }
 
-        // 3. Mark in existing_contacts table so that if this contact chats again,
-        // it is treated as an existing contact and will NOT receive automated greetings.
-        await recordExistingContact({
-            id: cleanPhone || jid,
-            phone: cleanPhone,
-            jid: phoneJid || jid,
-            lid: lidJid,
-            source: 'deleted_lead'
-        });
-
-        // 4. Emit deletion events so active UI instantly updates
+        // 3. Emit deletion events so active UI instantly updates
         for (const cJid of candidateJids) {
             try {
                 chatEvents.emit('chat_cleared', { jid: cJid });
