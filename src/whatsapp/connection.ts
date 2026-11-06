@@ -96,6 +96,8 @@ export const enqueueManualWhatsAppMessage = async (jid: string, text: string, de
                 try {
                     await (socket as any).readMessages([lastMsgKey]);
                     unrepliedMessageKeys.delete(jid);
+                    const info = await resolveContactJids(jid, socket);
+                    for (const cJid of info.candidateJids) unrepliedMessageKeys.delete(cJid);
                 } catch {}
             }
 
@@ -369,45 +371,6 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
             }
         });
 
-        // Track active chats from phone
-        sock.ev.on('chats.upsert', async (chats: any[]) => {
-            for (const chat of chats || []) {
-                const chatId = chat.id;
-                if (!chatId || chatId.endsWith('@g.us') || chatId.endsWith('@broadcast') || chatId.endsWith('@newsletter')) continue;
-                if (!chatId.endsWith('@s.whatsapp.net') && !chatId.endsWith('@lid')) continue;
-                try {
-                    const info = await resolveContactJids(chatId, sock);
-                    await recordExistingContact({
-                        id: info.cleanPhone || chatId,
-                        phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
-                        jid: info.phoneJid,
-                        lid: info.lidJid,
-                        name: chat.name || chat.displayName || undefined,
-                        source: 'chats_upsert'
-                    });
-                } catch {}
-            }
-        });
-
-        sock.ev.on('chats.update', async (chatUpdates: any[]) => {
-            for (const chat of chatUpdates || []) {
-                const chatId = chat.id;
-                if (!chatId || chatId.endsWith('@g.us') || chatId.endsWith('@broadcast') || chatId.endsWith('@newsletter')) continue;
-                if (!chatId.endsWith('@s.whatsapp.net') && !chatId.endsWith('@lid')) continue;
-                try {
-                    const info = await resolveContactJids(chatId, sock);
-                    await recordExistingContact({
-                        id: info.cleanPhone || chatId,
-                        phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
-                        jid: info.phoneJid,
-                        lid: info.lidJid,
-                        name: chat.name || chat.displayName || undefined,
-                        source: 'chats_update'
-                    });
-                } catch {}
-            }
-        });
-
         // Handle Inbound & Outbound Messages
         sock.ev.on('messages.upsert', async ({ messages, type }) => {
             const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
@@ -509,20 +472,23 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
 
                 if (!text && !hasMedia) continue;
 
+                // Resolve contact JIDs and real phone number
+                const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid, sock);
+                const leadPhone = cleanPhone && !cleanPhone.includes('@') ? cleanPhone : (jid.endsWith('@s.whatsapp.net') ? jid.replace('@s.whatsapp.net', '') : undefined);
+                const pushName = msg.pushName || '';
+
                 // Track incoming unreplied message key (DO NOT mark as read yet, only when replied!)
                 if (msg.key?.id) {
                     unrepliedMessageKeys.set(jid, msg.key);
+                    for (const cJid of candidateJids) {
+                        unrepliedMessageKeys.set(cJid, msg.key);
+                    }
                 }
 
                 // Sticky session assignment
                 if (runtimeSessionId !== 'legacy' && runtimeSessionId !== 'pending') {
                     globalWhatsAppManager.setStickyAssignment(jid, runtimeSessionId);
                 }
-
-                // Resolve contact JIDs and real phone number
-                const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid, sock);
-                const leadPhone = cleanPhone && !cleanPhone.includes('@') ? cleanPhone : (jid.endsWith('@s.whatsapp.net') ? jid.replace('@s.whatsapp.net', '') : undefined);
-                const pushName = msg.pushName || '';
 
                 // Check if customer quoted an earlier conversation message (not an automated ad greeting)
                 const contextInfo = (rawContent as any)?.extendedTextMessage?.contextInfo
@@ -572,8 +538,9 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 const bizConfig = getBusinessConfig();
 
                 if (botControl.enabled && bizConfig.enableGreeting && bizConfig.welcomeMessage) {
-                    if (!greetingInProgress.has(jid)) {
-                        greetingInProgress.add(jid);
+                    const isAnyGreetingInProgress = candidateJids.some((cJid) => greetingInProgress.has(cJid));
+                    if (!isAnyGreetingInProgress) {
+                        for (const cJid of candidateJids) greetingInProgress.add(cJid);
                         try {
                             const shouldGreet = await shouldCustomerBeGreeted(jid, sock);
                             if (shouldGreet) {
@@ -597,32 +564,39 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                                             }
                                         } catch {}
 
-                                        const sent = await sock.sendMessage(jid, { text: welcomeText });
-                                        await saveMessage(jid, 'assistant', welcomeText, 'bot', sent?.key?.id || undefined);
-                                        await markCustomerGreeted(jid, sock);
+                                        try {
+                                            const sent = await sock.sendMessage(jid, { text: welcomeText });
+                                            await saveMessage(jid, 'assistant', welcomeText, 'bot', sent?.key?.id || undefined);
+                                            await markCustomerGreeted(jid, sock);
 
-                                        // Mark incoming customer message as read (centang biru 2) now that it is replied!
-                                        if (msg.key && typeof (sock as any).readMessages === 'function') {
-                                            try {
-                                                await (sock as any).readMessages([msg.key]);
-                                                unrepliedMessageKeys.delete(jid);
-                                            } catch {}
-                                        }
+                                            // Mark incoming customer message as read (centang biru 2) now that it is replied!
+                                            if (msg.key && typeof (sock as any).readMessages === 'function') {
+                                                try {
+                                                    await (sock as any).readMessages([msg.key]);
+                                                    unrepliedMessageKeys.delete(jid);
+                                                    for (const cJid of candidateJids) unrepliedMessageKeys.delete(cJid);
+                                                } catch {}
+                                            }
 
-                                        if (runtimeSessionId !== 'legacy' && runtimeSessionId !== 'pending') {
-                                            globalWhatsAppManager.recordMessageSent(runtimeSessionId);
+                                            if (runtimeSessionId !== 'legacy' && runtimeSessionId !== 'pending') {
+                                                globalWhatsAppManager.recordMessageSent(runtimeSessionId);
+                                            }
+                                            appLogger.info({ component: 'whatsapp', jid, welcomeText: welcomeText.slice(0, 50) }, 'whatsapp.auto_greeting_sent');
+                                        } finally {
+                                            setTimeout(() => {
+                                                for (const cJid of candidateJids) greetingInProgress.delete(cJid);
+                                            }, 3000);
                                         }
-                                        appLogger.info({ component: 'whatsapp', jid, welcomeText: welcomeText.slice(0, 50) }, 'whatsapp.auto_greeting_sent');
                                     }
                                 );
                             } else {
+                                for (const cJid of candidateJids) greetingInProgress.delete(cJid);
                                 // DO NOT mark as greeted when skipped!
                                 appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.greeting_skipped_conditions_not_met');
                             }
                         } catch (err) {
+                            for (const cJid of candidateJids) greetingInProgress.delete(cJid);
                             appLogger.error({ component: 'whatsapp', jid, err }, 'whatsapp.auto_greeting_failed');
-                        } finally {
-                            greetingInProgress.delete(jid);
                         }
                     }
                 }
