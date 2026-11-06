@@ -150,3 +150,25 @@ if (!socketContent.includes('handleCompanionRegRefresh')) {
 } else {
     console.log('[patch-baileys] socket.js already patched.');
 }
+
+// 3. Patch chat-utils.js to support clearChatAction and deleteChatAction sync
+const chatUtilsPath = path.resolve('node_modules/@whiskeysockets/baileys/lib/Utils/chat-utils.js');
+if (fs.existsSync(chatUtilsPath)) {
+    let chatUtilsContent = fs.readFileSync(chatUtilsPath, 'utf8');
+    const targetBlock = `    else if (action?.deleteChatAction || type === 'deleteChat') {
+        if (!isInitialSync) {
+            ev.emit('chats.delete', [id]);
+        }
+    }`;
+    const replacementBlock = `    else if (action?.deleteChatAction || type === 'deleteChat' || action?.clearChatAction || type === 'clearChat') {
+        ev.emit('chats.delete', [id]);
+    }`;
+
+    if (chatUtilsContent.includes(targetBlock)) {
+        chatUtilsContent = chatUtilsContent.replace(targetBlock, replacementBlock);
+        fs.writeFileSync(chatUtilsPath, chatUtilsContent, 'utf8');
+        console.log('[patch-baileys] Successfully patched chat-utils.js for delete/clear chat sync.');
+    } else if (chatUtilsContent.includes("action?.clearChatAction || type === 'clearChat'")) {
+        console.log('[patch-baileys] chat-utils.js already patched.');
+    }
+}
