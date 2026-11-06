@@ -3,6 +3,7 @@ import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import fs from 'fs';
 import path from 'path';
+import net from 'node:net';
 import dotenv from 'dotenv';
 import type { Server } from 'node:http';
 import { createAdminSecurity, parseCookies, csrfTokenFromRequest } from './security.js';
@@ -15,6 +16,15 @@ dotenv.config();
 
 let activeAdminServer: Server | null = null;
 
+const isPortFreeOnLoopback = (port: number): Promise<boolean> => {
+    return new Promise((resolve) => {
+        const tester = net.createServer()
+            .once('error', () => resolve(false))
+            .once('listening', () => tester.close(() => resolve(true)))
+            .listen(port, '127.0.0.1');
+    });
+};
+
 const listenOnAvailablePort = async (
     app: express.Express,
     startPort: number,
@@ -23,6 +33,13 @@ const listenOnAvailablePort = async (
 ): Promise<{ port: number; server: Server }> => {
     let port = startPort;
     for (let i = 0; i < maxTries; i++) {
+        const isFree = await isPortFreeOnLoopback(port);
+        if (!isFree) {
+            appLogger.warn({ component: 'admin-server', port }, 'admin_server.port_loopback_occupied_skipping');
+            port++;
+            continue;
+        }
+
         try {
             const server = await new Promise<Server>((resolve, reject) => {
                 const s = app.listen(port, host, () => resolve(s));
@@ -116,7 +133,7 @@ export const startAdminServer = async (): Promise<number> => {
     app.get('/admin', (_req, res) => res.redirect('/app'));
 
     applyCliNetworkConfig();
-    const requestedPort = Number(process.env.PORT || 3009);
+    const requestedPort = Number(process.env.PORT || 3100);
     const host = process.env.HOST || '0.0.0.0';
     const { port, server } = await listenOnAvailablePort(app, requestedPort, 20, host);
     activeAdminServer = server;

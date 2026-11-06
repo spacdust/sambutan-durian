@@ -118,7 +118,7 @@ if not exist "business.config.json" (
 )
 
 :: Baca PORT dari .env
-set "APP_PORT=3009"
+set "APP_PORT=3100"
 if exist ".env" (
     for /f "usebackq tokens=1,2 delims==" %%A in (".env") do (
         set "ENV_KEY=%%A"
