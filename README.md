@@ -49,7 +49,21 @@ SQLITE_PATH=./data/durian.db
 
 ### 4. Menjalankan Aplikasi
 
-#### Mode Pengembangan (Development)
+#### ⚡ Cara Termudah di Windows (1-Click Auto Launcher)
+Cukup **klik dua kali** (double click) file:
+👉 **`start.bat`** (atau **`jalankan.bat`**)
+
+File ini otomatis:
+1. Memeriksa ketersediaan **Node.js** dan **NPM**.
+2. Mengecek dan mengunduh pembaruan terbaru dari GitHub (`git pull origin main`).
+3. Memeriksa file konfigurasi (`.env` dan `business.config.json`).
+4. Memeriksa & menginstal dependensi (`node_modules`) dan patch Baileys jika ada pembaruan.
+5. Memeriksa status build aplikasi (`dist/`).
+6. Menjalankan server dan otomatis membuka Web Admin di browser (**http://localhost:3009/app**).
+
+---
+
+#### Mode Pengembangan Manual (Development)
 ```bash
 npm run dev
 ```
