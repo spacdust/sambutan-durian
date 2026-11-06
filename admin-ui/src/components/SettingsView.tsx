@@ -10,6 +10,8 @@ import {
   Lock,
   Building,
   MessageSquare,
+  Clock,
+  Moon,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
@@ -25,6 +27,11 @@ export const SettingsView: React.FC = () => {
   const [csName, setCsName] = useState('Admin Durian');
   const [welcomeMessage, setWelcomeMessage] = useState('Halo kak! Selamat datang di Sambutan Durian 🍈 Ada yang bisa kami bantu seputar pesanan durian hari ini?');
   const [enableGreeting, setEnableGreeting] = useState(true);
+  const [enableOffHoursGreeting, setEnableOffHoursGreeting] = useState(false);
+  const [offHoursStart, setOffHoursStart] = useState('21:00');
+  const [offHoursEnd, setOffHoursEnd] = useState('08:00');
+  const [offHoursMessage, setOffHoursMessage] = useState('Halo kak {{nama}}! Terima kasih sudah menghubungi Sambutan Durian 🍈 Saat ini kami sedang di luar jam kerja (toko tutup). Pesan kakak sudah kami terima dan akan segera kami balas saat jam operasional kembali aktif. Terima kasih atas pengertiannya! 🙏');
+  const [isCurrentlyOffHours, setIsCurrentlyOffHours] = useState(false);
   const [adminPhone, setAdminPhone] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [loading, setLoading] = useState(true);
@@ -43,6 +50,11 @@ export const SettingsView: React.FC = () => {
         setCsName(res.csName || 'Admin Durian');
         setWelcomeMessage(res.welcomeMessage || 'Halo kak! Selamat datang di Sambutan Durian 🍈 Ada yang bisa kami bantu seputar pesanan durian hari ini?');
         setEnableGreeting(res.enableGreeting ?? true);
+        setEnableOffHoursGreeting(res.enableOffHoursGreeting ?? false);
+        setOffHoursStart(res.offHoursStart || '21:00');
+        setOffHoursEnd(res.offHoursEnd || '08:00');
+        setOffHoursMessage(res.offHoursMessage || 'Halo kak {{nama}}! Terima kasih sudah menghubungi Sambutan Durian 🍈 Saat ini kami sedang di luar jam kerja (toko tutup). Pesan kakak sudah kami terima dan akan segera kami balas saat jam operasional kembali aktif. Terima kasih atas pengertiannya! 🙏');
+        setIsCurrentlyOffHours(res.isCurrentlyOffHours ?? false);
         setAdminPhone(res.adminPhone || '');
       }
     } catch (err) {
@@ -61,11 +73,16 @@ export const SettingsView: React.FC = () => {
         csName,
         welcomeMessage,
         enableGreeting,
+        enableOffHoursGreeting,
+        offHoursStart,
+        offHoursEnd,
+        offHoursMessage,
         adminPhone,
         ...(newPassword ? { password: newPassword } : {}),
       });
       setNewPassword('');
       toast.success('Pengaturan Sambutan Durian berhasil disimpan!', 'Berhasil Menyimpan');
+      loadSettings();
     } catch (err: any) {
       toast.error(err.message || 'Gagal menyimpan pengaturan.', 'Error');
     } finally {
@@ -160,6 +177,93 @@ export const SettingsView: React.FC = () => {
               <p className="text-[11px] text-muted-foreground">
                 📌 <strong>Aturan Kerja:</strong> Pesan ini <em>hanya dikirim satu kali</em> saat nomor pelanggan pertama kali menghubungi. Pesan berikutnya dari pelanggan tersebut tidak akan dibalas lagi.
               </p>
+            </div>
+
+            {/* Off-Hours Greeting Feature (Opsional) */}
+            <div className="rounded-xl border p-4 space-y-4 bg-muted/20">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <div className="text-xs font-semibold text-foreground flex items-center gap-2">
+                    <Moon size={14} className="text-indigo-400" />
+                    <span>Sambutan di Luar Jam Kerja (Opsional)</span>
+                    <Badge variant={enableOffHoursGreeting ? 'success' : 'secondary'} className="text-[10px]">
+                      {enableOffHoursGreeting ? '● Aktif' : '○ Nonaktif'}
+                    </Badge>
+                    {enableOffHoursGreeting && (
+                      <Badge variant="outline" className={`text-[10px] ${isCurrentlyOffHours ? 'text-amber-500 border-amber-500/30 bg-amber-500/10' : 'text-emerald-500 border-emerald-500/30 bg-emerald-500/10'}`}>
+                        {isCurrentlyOffHours ? '🌙 Saat ini: Sedang Jam Tutup' : '☀️ Saat ini: Jam Buka Normal'}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    Kirim balasan khusus saat nomor baru menyapa pada jam toko sedang tutup / istirahat.
+                  </p>
+                </div>
+                <Switch
+                  checked={enableOffHoursGreeting}
+                  onCheckedChange={setEnableOffHoursGreeting}
+                />
+              </div>
+
+              {enableOffHoursGreeting && (
+                <div className="space-y-3 pt-3 border-t">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                        <Clock size={13} className="text-muted-foreground" />
+                        <span>Mulai Jam Tutup (WIB)</span>
+                      </label>
+                      <Input
+                        type="time"
+                        value={offHoursStart}
+                        onChange={(e) => setOffHoursStart(e.target.value)}
+                        className="font-mono text-xs"
+                        required={enableOffHoursGreeting}
+                      />
+                      <span className="text-[10px] text-muted-foreground">
+                        Contoh: 21:00 (mulai pukul 9 malam)
+                      </span>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-semibold text-foreground flex items-center gap-1.5">
+                        <Clock size={13} className="text-muted-foreground" />
+                        <span>Selesai Jam Tutup (WIB)</span>
+                      </label>
+                      <Input
+                        type="time"
+                        value={offHoursEnd}
+                        onChange={(e) => setOffHoursEnd(e.target.value)}
+                        className="font-mono text-xs"
+                        required={enableOffHoursGreeting}
+                      />
+                      <span className="text-[10px] text-muted-foreground">
+                        Contoh: 08:00 (selesai pukul 8 pagi)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-foreground">
+                        Template Pesan Sambutan di Luar Jam Kerja
+                      </label>
+                      <span className="text-[10px] text-muted-foreground">
+                        Gunakan: <code className="text-primary font-mono bg-primary/10 px-1 py-0.5 rounded font-bold">&#123;&#123;nama&#125;&#125;</code> untuk nama WA pengirim
+                      </span>
+                    </div>
+                    <Textarea
+                      rows={3}
+                      value={offHoursMessage}
+                      onChange={(e) => setOffHoursMessage(e.target.value)}
+                      placeholder="Pesan otomatis yang dikirim saat customer baru chat di luar jam kerja..."
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      🌙 Ketika nomor baru chat di antara jam <strong>{offHoursStart} WIB</strong> s/d <strong>{offHoursEnd} WIB</strong>, bot akan otomatis mengirimkan pesan ini. Di luar rentang jam tersebut, bot tetap menggunakan pesan sambutan utama di atas.
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-1.5">

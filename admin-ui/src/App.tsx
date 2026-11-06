@@ -124,9 +124,9 @@ export const App: React.FC = () => {
 
   const navItems = [
     { key: 'whatsapp', label: 'Koneksi WhatsApp', icon: Smartphone },
-    { key: 'dashboard', label: 'Ringkasan', icon: LayoutDashboard },
-    { key: 'leads', label: 'Pesan & Chat', icon: Users },
     { key: 'settings', label: 'Pengaturan', icon: Settings },
+    { key: 'leads', label: 'Pesan & Chat', icon: Users },
+    { key: 'dashboard', label: 'Ringkasan', icon: LayoutDashboard },
   ];
 
   const currentNav = navItems.find((item) => item.key === activeView) || navItems[0];

@@ -1,7 +1,7 @@
 import express, { type Request, type Response, type Router } from 'express';
 import QRCode from 'qrcode';
 import { pool } from '../config/db.js';
-import { getBusinessConfig, updateBusinessConfig } from '../config/business.js';
+import { getBusinessConfig, updateBusinessConfig, isCurrentTimeWithinOffHours } from '../config/business.js';
 import { getFullChatHistory, saveMessage, chatEvents } from '../chat/history.js';
 import { getLead, upsertLead, deleteLeadCompletely, resetCustomerGreeting, markCustomerGreeted } from '../chat/leads.js';
 import { globalWhatsAppManager } from '../whatsapp/whatsapp-manager.js';
@@ -272,6 +272,15 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
             const lead = await getLead(jid);
             const bizConfig = getBusinessConfig();
             let welcomeText = bizConfig.welcomeMessage || 'Halo! Selamat datang di Sambutan Durian 🍈';
+            if (bizConfig.enableOffHoursGreeting && bizConfig.offHoursMessage) {
+                const isOffHours = isCurrentTimeWithinOffHours(
+                    bizConfig.offHoursStart || '21:00',
+                    bizConfig.offHoursEnd || '08:00'
+                );
+                if (isOffHours) {
+                    welcomeText = bizConfig.offHoursMessage;
+                }
+            }
             const name = lead?.name || 'kak';
             welcomeText = welcomeText.replace(/{{nama}}|{nama}|{{name}}|{name}/gi, name);
             await enqueueManualWhatsAppMessage(jid, welcomeText);
@@ -512,24 +521,48 @@ export const createAdminApiRouter = (adminSecurity: ReturnType<typeof createAdmi
     // 20. System Settings & Business Config
     router.get('/settings', (_req: Request, res: Response) => {
         const config = getBusinessConfig();
+        const isCurrentlyOffHours = isCurrentTimeWithinOffHours(
+            config.offHoursStart || '21:00',
+            config.offHoursEnd || '08:00'
+        );
         return res.json({
             businessName: config.businessName,
             csName: config.csName,
             welcomeMessage: config.welcomeMessage,
             enableGreeting: config.enableGreeting ?? true,
             adminPhone: config.adminPhone || '',
+            enableOffHoursGreeting: config.enableOffHoursGreeting ?? false,
+            offHoursStart: config.offHoursStart || '21:00',
+            offHoursEnd: config.offHoursEnd || '08:00',
+            offHoursMessage: config.offHoursMessage || '',
+            isCurrentlyOffHours,
         });
     });
 
     router.post('/settings', (req: Request, res: Response) => {
         try {
-            const { businessName, csName, welcomeMessage, enableGreeting, adminPhone, password } = req.body;
+            const {
+                businessName,
+                csName,
+                welcomeMessage,
+                enableGreeting,
+                adminPhone,
+                password,
+                enableOffHoursGreeting,
+                offHoursStart,
+                offHoursEnd,
+                offHoursMessage,
+            } = req.body;
             const updates: any = {};
             if (businessName) updates.businessName = String(businessName).trim();
             if (csName) updates.csName = String(csName).trim();
             if (welcomeMessage !== undefined) updates.welcomeMessage = String(welcomeMessage).trim();
             if (enableGreeting !== undefined) updates.enableGreeting = Boolean(enableGreeting);
             if (adminPhone !== undefined) updates.adminPhone = String(adminPhone).trim();
+            if (enableOffHoursGreeting !== undefined) updates.enableOffHoursGreeting = Boolean(enableOffHoursGreeting);
+            if (offHoursStart !== undefined) updates.offHoursStart = String(offHoursStart).trim();
+            if (offHoursEnd !== undefined) updates.offHoursEnd = String(offHoursEnd).trim();
+            if (offHoursMessage !== undefined) updates.offHoursMessage = String(offHoursMessage).trim();
 
             updateBusinessConfig(updates);
 

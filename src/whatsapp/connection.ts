@@ -25,7 +25,7 @@ import { upsertLead, hasCustomerBeenGreeted, shouldCustomerBeGreeted, markCustom
 import { saveMessage, getChatHistory } from '../chat/history.js';
 import { pool } from '../config/db.js';
 import { getBotRuntimeControl } from './bot-runtime-control.js';
-import { getBusinessConfig } from '../config/business.js';
+import { getBusinessConfig, isCurrentTimeWithinOffHours } from '../config/business.js';
 
 const logger = pino({ level: 'silent' });
 
@@ -549,7 +549,7 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                 const botControl = await getBotRuntimeControl();
                 const bizConfig = getBusinessConfig();
 
-                if (botControl.enabled && bizConfig.enableGreeting && bizConfig.welcomeMessage) {
+                if (botControl.enabled && bizConfig.enableGreeting && (bizConfig.welcomeMessage || bizConfig.offHoursMessage)) {
                     const isAnyGreetingInProgress = candidateJids.some((cJid) => greetingInProgress.has(cJid));
                     if (!isAnyGreetingInProgress) {
                         for (const cJid of candidateJids) greetingInProgress.add(cJid);
@@ -557,6 +557,16 @@ export const startWhatsAppConnection = async (sessionId = 'legacy'): Promise<WAS
                             const shouldGreet = await shouldCustomerBeGreeted(jid, sock);
                             if (shouldGreet) {
                                 let welcomeText = bizConfig.welcomeMessage;
+                                if (bizConfig.enableOffHoursGreeting && bizConfig.offHoursMessage) {
+                                    const isOffHours = isCurrentTimeWithinOffHours(
+                                        bizConfig.offHoursStart || '21:00',
+                                        bizConfig.offHoursEnd || '08:00'
+                                    );
+                                    if (isOffHours) {
+                                        welcomeText = bizConfig.offHoursMessage;
+                                    }
+                                }
+
                                 if (pushName) {
                                     welcomeText = welcomeText.replace(/{{nama}}|{nama}|{{name}}|{name}/gi, pushName);
                                 } else {

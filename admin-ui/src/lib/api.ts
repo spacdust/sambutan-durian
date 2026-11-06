@@ -399,8 +399,31 @@ export const api = {
       }),
   },
   settings: {
-    getConfig: () => apiRequest<{ businessName: string; csName: string; welcomeMessage: string; enableGreeting: boolean; adminPhone: string }>('/admin/api/settings'),
-    updateConfig: (data: { businessName?: string; csName?: string; welcomeMessage?: string; enableGreeting?: boolean; adminPhone?: string; password?: string }) =>
+    getConfig: () =>
+      apiRequest<{
+        businessName: string;
+        csName: string;
+        welcomeMessage: string;
+        enableGreeting: boolean;
+        adminPhone: string;
+        enableOffHoursGreeting: boolean;
+        offHoursStart: string;
+        offHoursEnd: string;
+        offHoursMessage: string;
+        isCurrentlyOffHours: boolean;
+      }>('/admin/api/settings'),
+    updateConfig: (data: {
+      businessName?: string;
+      csName?: string;
+      welcomeMessage?: string;
+      enableGreeting?: boolean;
+      adminPhone?: string;
+      password?: string;
+      enableOffHoursGreeting?: boolean;
+      offHoursStart?: string;
+      offHoursEnd?: string;
+      offHoursMessage?: string;
+    }) =>
       apiRequest<{ ok: boolean }>('/admin/api/settings', {
         method: 'POST',
         body: JSON.stringify(data),
