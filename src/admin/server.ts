@@ -122,8 +122,19 @@ export const startAdminServer = async (): Promise<number> => {
     // Serve Frontend Vite SPA
     const adminUiDist = path.resolve('dist', 'admin-ui');
     if (fs.existsSync(adminUiDist)) {
-        app.use('/app', express.static(adminUiDist));
+        app.use('/app', express.static(adminUiDist, {
+            setHeaders: (res, filePath) => {
+                if (filePath.endsWith('.html')) {
+                    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+                    res.setHeader('Pragma', 'no-cache');
+                    res.setHeader('Expires', '0');
+                }
+            }
+        }));
         app.get(/^\/app(?:\/.*)?$/, (_req, res) => {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
             res.sendFile(path.join(adminUiDist, 'index.html'));
         });
     }

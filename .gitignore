@@ -3,10 +3,8 @@ node_modules/
 admin-ui/node_modules/
 */node_modules/
 
-# Production builds
-dist/
+# Production builds (dist is committed so git pull immediately works on other machines without manual build)
 admin-ui/dist/
-*/dist/
 
 # Environment and secrets
 .env

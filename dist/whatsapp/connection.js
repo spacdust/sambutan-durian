@@ -1,0 +1,705 @@
+import makeWASocket, { Browsers, DisconnectReason, fetchLatestBaileysVersion, fetchLatestWaWebVersion, makeCacheableSignalKeyStore, normalizeMessageContent, isJidGroup, isJidBroadcast, isJidNewsletter, } from '@whiskeysockets/baileys';
+import pino from 'pino';
+import qrcodeTerminal from 'qrcode-terminal';
+import QRCode from 'qrcode';
+import { aliasAuthState, claimLegacyAuthState, clearAuthState, hasAuthState, renameAuthState, usePostgresAuthState } from './auth.js';
+import { getWaSessionStatus, removeWaSessionStatus, setWaSessionStatus } from './status.js';
+import { globalWhatsAppManager } from './whatsapp-manager.js';
+import { calculateRandomDelayMs, calculateTypingDurationMs } from './anti-ban-delay.js';
+import { PerNumberQueue } from './per-number-queue.js';
+import { appLogger } from '../config/logger.js';
+import { upsertLead, shouldCustomerBeGreeted, markCustomerGreeted, resolveContactJids, recordExistingContact, deleteLeadCompletely, resetCustomerGreeting } from '../chat/leads.js';
+import { saveMessage } from '../chat/history.js';
+import { pool } from '../config/db.js';
+import { getBotRuntimeControl } from './bot-runtime-control.js';
+import { getBusinessConfig, isCurrentTimeWithinOffHours } from '../config/business.js';
+const logger = pino({ level: 'silent' });
+const installLibsignalConsoleFilter = () => {
+    const blocked = new Set(['Closing session:', 'Opening session:', 'Session already closed', 'Session already open']);
+    for (const level of ['info', 'warn']) {
+        const original = console[level];
+        if (original.__durianSignalFilter)
+            continue;
+        const filtered = (...args) => {
+            if (!blocked.has(String(args[0] || '')))
+                original(...args);
+        };
+        Object.defineProperty(filtered, '__durianSignalFilter', { value: true });
+        console[level] = filtered;
+    }
+};
+const activeSockets = new Map();
+const sessionAliases = new Map();
+const startingSessions = new Set();
+const reconnectTimers = new Map();
+const generations = new Map();
+const perNumberOutboundQueue = new PerNumberQueue();
+const greetingInProgress = new Set();
+const sentBotMessageIds = new Set();
+export const unrepliedMessageKeys = new Map();
+export const selectOutboundSessionId = (jid, onlineSessionIds) => {
+    const sticky = globalWhatsAppManager.getStickyAssignment(jid);
+    if (sticky && onlineSessionIds.includes(sticky))
+        return sticky;
+    const online = globalWhatsAppManager.getSessions().filter((s) => s.status === 'online' && onlineSessionIds.includes(s.phone));
+    if (online.length > 0)
+        return online[0].phone;
+    return onlineSessionIds[0] || null;
+};
+export const enqueueManualWhatsAppMessage = async (jid, text, dedupeKey = `manual:${Date.now()}`) => {
+    const onlineSessionIds = [...activeSockets.keys()].filter((id) => id !== 'pending');
+    if (!onlineSessionIds.length) {
+        throw new Error('Belum ada WhatsApp yang terhubung. Hubungkan nomor WhatsApp terlebih dahulu.');
+    }
+    const selectedId = selectOutboundSessionId(jid, onlineSessionIds);
+    if (!selectedId || !activeSockets.has(selectedId)) {
+        throw new Error('Tidak ada jalur WhatsApp yang aktif saat ini.');
+    }
+    const socket = activeSockets.get(selectedId);
+    const delayMs = calculateRandomDelayMs(globalWhatsAppManager.getConfig());
+    const typingDurationMs = calculateTypingDurationMs(text.length);
+    await perNumberOutboundQueue.enqueue(selectedId, delayMs, async () => {
+        try {
+            if (typeof socket.sendPresenceUpdate === 'function') {
+                await socket.sendPresenceUpdate('composing', jid);
+                await new Promise((resolve) => setTimeout(resolve, Math.min(1500, typingDurationMs)));
+                await socket.sendPresenceUpdate('paused', jid);
+            }
+        }
+        catch { }
+        const sent = await socket.sendMessage(jid, { text });
+        await saveMessage(jid, 'assistant', text, 'admin', sent?.key?.id || undefined);
+        await markCustomerGreeted(jid, socket);
+        // Mark customer unread message as read (centang biru 2) now that reply is sent
+        const lastMsgKey = unrepliedMessageKeys.get(jid);
+        if (lastMsgKey && typeof socket.readMessages === 'function') {
+            try {
+                await socket.readMessages([lastMsgKey]);
+                unrepliedMessageKeys.delete(jid);
+                const info = await resolveContactJids(jid, socket);
+                for (const cJid of info.candidateJids)
+                    unrepliedMessageKeys.delete(cJid);
+            }
+            catch { }
+        }
+        globalWhatsAppManager.recordMessageSent(selectedId);
+        return sent;
+    });
+};
+export const startWhatsAppConnection = async (sessionId = 'legacy') => {
+    installLibsignalConsoleFilter();
+    const existing = activeSockets.get(sessionId);
+    if (existing)
+        return existing;
+    if (startingSessions.has(sessionId)) {
+        let attempts = 0;
+        while (attempts < 20) {
+            await new Promise((r) => setTimeout(r, 250));
+            if (activeSockets.has(sessionId))
+                return activeSockets.get(sessionId);
+            attempts++;
+        }
+    }
+    startingSessions.add(sessionId);
+    const myGen = (generations.get(sessionId) || 0) + 1;
+    generations.set(sessionId, myGen);
+    try {
+        setWaSessionStatus(sessionId, { state: 'connecting', detail: 'Menghubungkan ke WhatsApp...' });
+        const { state, saveCreds } = await usePostgresAuthState(sessionId);
+        let waVersion = [2, 3000, 1051318246];
+        try {
+            const fetched = await fetchLatestWaWebVersion({});
+            if (fetched?.version)
+                waVersion = fetched.version;
+        }
+        catch {
+            try {
+                const fetched = await fetchLatestBaileysVersion();
+                if (fetched?.version)
+                    waVersion = fetched.version;
+            }
+            catch { }
+        }
+        const sock = makeWASocket({
+            version: waVersion,
+            logger,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, logger),
+            },
+            printQRInTerminal: false,
+            generateHighQualityLinkPreview: false,
+            syncFullHistory: true,
+            browser: Browsers.macOS('Chrome'),
+            markOnlineOnConnect: true,
+            getMessage: async () => undefined,
+            connectTimeoutMs: 60_000,
+            defaultQueryTimeoutMs: 60_000,
+            keepAliveIntervalMs: 30_000,
+            retryRequestDelayMs: 250,
+        });
+        activeSockets.set(sessionId, sock);
+        const scheduleReconnect = (targetSessionId, delayMs, reason) => {
+            const timer = reconnectTimers.get(targetSessionId);
+            if (timer)
+                clearTimeout(timer);
+            const runtimeId = sessionAliases.get(targetSessionId) || targetSessionId;
+            reconnectTimers.set(targetSessionId, setTimeout(() => {
+                reconnectTimers.delete(targetSessionId);
+                appLogger.info({ component: 'whatsapp', sessionId: runtimeId, reason }, 'whatsapp.reconnecting');
+                startWhatsAppConnection(targetSessionId).catch((err) => {
+                    appLogger.error({ component: 'whatsapp', sessionId: runtimeId, err }, 'whatsapp.reconnect_failed');
+                });
+            }, delayMs));
+        };
+        sock.ev.on('creds.update', async (update) => {
+            await saveCreds();
+            const meId = (sock.user?.id || sock.authState?.creds?.me?.id || update?.me?.id);
+            if (meId) {
+                const phone = meId.split(':')[0].split('@')[0];
+                if (phone) {
+                    activeSockets.set(phone, sock);
+                    sessionAliases.set(sessionId, phone);
+                    const currentStatus = getWaSessionStatus(sessionId);
+                    setWaSessionStatus(sessionId, {
+                        ...currentStatus,
+                        phone,
+                    });
+                    const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
+                    if (runtimeSessionId !== sessionId) {
+                        const runtimeStatus = getWaSessionStatus(runtimeSessionId);
+                        setWaSessionStatus(runtimeSessionId, {
+                            ...runtimeStatus,
+                            phone,
+                        });
+                    }
+                    appLogger.info({ component: 'whatsapp', sessionId, phone }, 'whatsapp.creds_phone_detected');
+                }
+            }
+        });
+        sock.ev.on('connection.update', async (update) => {
+            const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
+            const currentActive = activeSockets.get(sessionId) || activeSockets.get(runtimeSessionId);
+            if (myGen !== generations.get(sessionId) || (currentActive && currentActive !== sock))
+                return;
+            const { connection, lastDisconnect, qr } = update;
+            if (qr) {
+                // If this socket was created for pairing code and is waiting for user confirmation, do not overwrite with QR
+                const credsAny = sock.authState?.creds;
+                if (credsAny?.pairingCode && !credsAny?.registered) {
+                    return;
+                }
+                let qrDataUrl = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(qr)}`;
+                try {
+                    qrDataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 260 });
+                }
+                catch { }
+                setWaSessionStatus(runtimeSessionId, { state: 'qr', detail: 'Scan QR di web admin', qr, qrUrl: qrDataUrl });
+                appLogger.info({ component: 'whatsapp', sessionId: runtimeSessionId }, 'whatsapp.qr_ready');
+                qrcodeTerminal.generate(qr, { small: true });
+            }
+            if (connection === 'close') {
+                activeSockets.delete(sessionId);
+                activeSockets.delete(runtimeSessionId);
+                const boom = lastDisconnect?.error;
+                const statusCode = boom?.output?.statusCode;
+                const loggedOut = statusCode === DisconnectReason.loggedOut;
+                const replaced = statusCode === DisconnectReason.connectionReplaced || statusCode === 440;
+                appLogger.info({ component: 'whatsapp', sessionId: runtimeSessionId, statusCode }, 'whatsapp.connection_closed');
+                if (statusCode === 408) {
+                    setWaSessionStatus(runtimeSessionId, { state: 'qr', detail: 'QR expired, klik refresh untuk coba lagi' });
+                    scheduleReconnect(sessionId, 1000, 'QR expired');
+                    return;
+                }
+                if (statusCode === 515) {
+                    // WhatsApp protocol restartRequired: occurs during pairing completion to switch to authenticated stream
+                    setWaSessionStatus(runtimeSessionId, { state: 'connecting', detail: 'Menyelesaikan penautan WhatsApp...' });
+                    scheduleReconnect(sessionId, 1500, 'restart stream');
+                    return;
+                }
+                if (loggedOut) {
+                    setWaSessionStatus(runtimeSessionId, { state: 'logged_out', detail: 'Logged out' });
+                    await clearAuthState(runtimeSessionId);
+                    if (sessionId !== runtimeSessionId)
+                        await clearAuthState(sessionId);
+                    scheduleReconnect(runtimeSessionId, 2000, 'logged out');
+                    return;
+                }
+                if (replaced) {
+                    setWaSessionStatus(runtimeSessionId, { state: 'close', detail: 'Session diganti perangkat lain' });
+                    scheduleReconnect(runtimeSessionId, 8000, 'conflict replaced');
+                    return;
+                }
+                setWaSessionStatus(runtimeSessionId, {
+                    state: 'close',
+                    detail: `Terputus (${statusCode ?? 'unknown'})`,
+                });
+                if (runtimeSessionId !== 'legacy')
+                    globalWhatsAppManager.setSessionStatus(runtimeSessionId, 'disconnected');
+                scheduleReconnect(runtimeSessionId, 3000, `close ${statusCode ?? 'unknown'}`);
+            }
+            else if (connection === 'open') {
+                const meId = sock.user?.id || '';
+                const phone = meId.split(':')[0].split('@')[0];
+                if (phone) {
+                    activeSockets.set(phone, sock);
+                }
+                if (sessionId === 'pending') {
+                    if (phone) {
+                        sessionAliases.set('pending', phone);
+                        aliasAuthState('pending', phone);
+                        await renameAuthState('pending', phone);
+                    }
+                    setWaSessionStatus(sessionId, { state: 'open', detail: 'Nomor terbaca. Simpan nomor di web admin.', phone, qr: undefined, qrUrl: undefined });
+                    appLogger.info({ component: 'whatsapp', sessionId, phone }, 'whatsapp.pending_phone_detected');
+                }
+                setWaSessionStatus(runtimeSessionId, { state: 'open', detail: 'Terhubung', phone, qr: undefined, qrUrl: undefined });
+                if (runtimeSessionId !== 'legacy')
+                    globalWhatsAppManager.updateSession(runtimeSessionId, { phone, status: 'online' });
+                appLogger.info({ component: 'whatsapp', sessionId: runtimeSessionId, phone }, 'whatsapp.connection_open');
+                // Explicitly send presence available so WhatsApp forwards incoming messages
+                try {
+                    await sock.sendPresenceUpdate('available');
+                }
+                catch (presenceErr) {
+                    appLogger.warn({ component: 'whatsapp', sessionId: runtimeSessionId, err: presenceErr }, 'whatsapp.presence_available_failed');
+                }
+            }
+            else if (connection === 'connecting') {
+                setWaSessionStatus(runtimeSessionId, { state: 'connecting', detail: 'Menghubungkan...' });
+            }
+        });
+        // Handle History Sync: protect existing WhatsApp chats from automated greetings
+        sock.ev.on('messaging-history.set', async ({ chats, contacts, messages }) => {
+            const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
+            appLogger.info({
+                component: 'whatsapp',
+                sessionId: runtimeSessionId,
+                chatCount: chats?.length || 0,
+                contactCount: contacts?.length || 0,
+                messageCount: messages?.length || 0
+            }, 'whatsapp.history_sync_received');
+            const bizConfig = getBusinessConfig();
+            const ignoreCtwa = bizConfig.ignoreCtwaGreeting ?? true;
+            // Group historical messages by remoteJid
+            const messagesByJid = new Map();
+            for (const msg of messages || []) {
+                const rJid = msg.key?.remoteJid;
+                if (!rJid)
+                    continue;
+                const list = messagesByJid.get(rJid) || [];
+                list.push(msg);
+                messagesByJid.set(rJid, list);
+                // If this is an outgoing message, check if it's a salam otomatis or ad greeting
+                if (msg.key?.fromMe) {
+                    const rawContent = normalizeMessageContent(msg.message);
+                    const contextInfo = rawContent?.extendedTextMessage?.contextInfo
+                        || rawContent?.contextInfo;
+                    const isAdOrCtwa = Boolean(contextInfo?.externalAdReply ||
+                        contextInfo?.quotedAd ||
+                        contextInfo?.entryPointConversionApp ||
+                        contextInfo?.entryPointConversionSource ||
+                        contextInfo?.ctwaClid ||
+                        contextInfo?.ctwaSignals);
+                    if (isAdOrCtwa) {
+                        try {
+                            const text = (rawContent?.conversation || rawContent?.extendedTextMessage?.text || rawContent?.imageMessage?.caption || '').trim();
+                            await saveMessage(rJid, 'assistant', text || '[Iklan Facebook]', 'salam_otomatis', msg.key?.id || undefined);
+                        }
+                        catch { }
+                    }
+                }
+            }
+            // 1. Process chats
+            for (const chat of chats || []) {
+                const chatId = chat.id;
+                if (!chatId || chatId.endsWith('@g.us') || chatId === 'status@broadcast' || chatId.endsWith('@broadcast') || chatId.endsWith('@newsletter')) {
+                    continue;
+                }
+                const isUserChat = chatId.endsWith('@s.whatsapp.net') || chatId.endsWith('@lid');
+                if (!isUserChat)
+                    continue;
+                // Check if this chat only contains an outgoing CTWA / salam otomatis message
+                const chatMsgs = messagesByJid.get(chatId) || [];
+                const incomingCount = chatMsgs.filter((m) => !m.key?.fromMe).length;
+                const hasOutgoingOnly = chatMsgs.length > 0 && incomingCount === 0;
+                if (ignoreCtwa && hasOutgoingOnly) {
+                    // This is a CTWA ad lead where WhatsApp Business sent salam otomatis, but the customer hasn't chatted yet!
+                    // Do NOT mark as an old conversation, so bot will greet when customer sends their first message.
+                    appLogger.info({ component: 'whatsapp', chatId }, 'whatsapp.history_sync_skipped_ctwa_lead');
+                    continue;
+                }
+                try {
+                    const info = await resolveContactJids(chatId, sock);
+                    const name = chat.name || chat.displayName || undefined;
+                    await recordExistingContact({
+                        id: info.cleanPhone || chatId,
+                        phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
+                        jid: info.phoneJid || (chatId.endsWith('@s.whatsapp.net') ? chatId : undefined),
+                        lid: info.lidJid || (chatId.endsWith('@lid') ? chatId : undefined),
+                        name,
+                        source: 'history_sync_chat'
+                    });
+                }
+                catch { }
+            }
+            // 2. Process contacts
+            for (const contact of contacts || []) {
+                const contactId = contact.id;
+                if (!contactId || contactId.endsWith('@g.us') || contactId.endsWith('@broadcast'))
+                    continue;
+                try {
+                    const pnJid = contactId.endsWith('@s.whatsapp.net') ? contactId : undefined;
+                    const cleanPhone = pnJid ? pnJid.replace('@s.whatsapp.net', '') : undefined;
+                    const lidJid = contact.lid ? (contact.lid.endsWith('@lid') ? contact.lid : `${contact.lid}@lid`) : undefined;
+                    const name = contact.name || contact.notify || undefined;
+                    await recordExistingContact({
+                        jid: contactId,
+                        phone: cleanPhone,
+                        lid: lidJid,
+                        name,
+                        source: 'history_sync_contact'
+                    });
+                }
+                catch { }
+            }
+            // 3. Process historical messages
+            for (const msg of messages || []) {
+                const rJid = msg.key?.remoteJid;
+                if (!rJid || rJid.endsWith('@g.us') || rJid.endsWith('@broadcast') || rJid.endsWith('@newsletter'))
+                    continue;
+                // If it's an outgoing message and ignoreCtwa is true, do not block contact as history_sync_msg
+                if (ignoreCtwa && msg.key?.fromMe) {
+                    continue;
+                }
+                try {
+                    const info = await resolveContactJids(rJid, sock);
+                    await recordExistingContact({
+                        id: info.cleanPhone || rJid,
+                        phone: info.cleanPhone && !info.cleanPhone.includes('@') ? info.cleanPhone : undefined,
+                        jid: info.phoneJid || (rJid.endsWith('@s.whatsapp.net') ? rJid : undefined),
+                        lid: info.lidJid || (rJid.endsWith('@lid') ? rJid : undefined),
+                        source: 'history_sync_msg'
+                    });
+                }
+                catch { }
+            }
+        });
+        // When user deletes a chat on WhatsApp Business phone, automatically clear the lead & reset greeting
+        sock.ev.on('chats.delete', async (chatIds) => {
+            for (const chatId of chatIds || []) {
+                try {
+                    await deleteLeadCompletely(chatId);
+                    await resetCustomerGreeting(chatId);
+                    appLogger.info({ component: 'whatsapp', chatId }, 'whatsapp.chat_deleted_on_phone');
+                }
+                catch { }
+            }
+        });
+        // Handle Inbound & Outbound Messages
+        sock.ev.on('messages.upsert', async ({ messages, type }) => {
+            const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
+            const currentActive = activeSockets.get(sessionId) || activeSockets.get(runtimeSessionId);
+            if (myGen !== generations.get(sessionId) || (currentActive && currentActive !== sock))
+                return;
+            appLogger.info({
+                component: 'whatsapp',
+                sessionId: runtimeSessionId,
+                type,
+                count: messages?.length || 0,
+            }, 'whatsapp.messages_upsert_event');
+            for (const msg of messages) {
+                if (!msg.message)
+                    continue;
+                const jid = msg.key.remoteJid;
+                if (!jid)
+                    continue;
+                // Ignore broadcast / status / group / newsletter
+                if (isJidBroadcast(jid) ||
+                    isJidGroup(jid) ||
+                    (typeof isJidNewsletter === 'function' && isJidNewsletter(jid)) ||
+                    jid === 'status@broadcast' ||
+                    jid.endsWith('@broadcast') ||
+                    jid.endsWith('@g.us') ||
+                    jid.endsWith('@newsletter')) {
+                    continue;
+                }
+                // Check user direct message (standard JID or LID)
+                const isUserMessage = jid.endsWith('@s.whatsapp.net') || jid.endsWith('@lid');
+                if (!isUserMessage) {
+                    continue;
+                }
+                // Unpack message content
+                const rawContent = normalizeMessageContent(msg.message);
+                if (!rawContent)
+                    continue;
+                // Extract message text
+                const text = (rawContent.conversation
+                    || rawContent.extendedTextMessage?.text
+                    || rawContent.imageMessage?.caption
+                    || rawContent.videoMessage?.caption
+                    || rawContent.buttonsResponseMessage?.selectedDisplayText
+                    || rawContent.listResponseMessage?.title
+                    || rawContent.templateButtonReplyMessage?.selectedId
+                    || '').trim();
+                const hasMedia = Boolean(rawContent.imageMessage ||
+                    rawContent.videoMessage ||
+                    rawContent.audioMessage ||
+                    rawContent.documentMessage ||
+                    rawContent.stickerMessage);
+                // Handle messages sent from our own account (manual CS reply or automated salam/ad greeting)
+                if (msg.key.fromMe) {
+                    if (text || hasMedia) {
+                        const isSentByBot = msg.key?.id ? sentBotMessageIds.has(msg.key.id) : false;
+                        if (isSentByBot) {
+                            // Already handled & recorded when dispatched by our bot, avoid duplicating as manual CS
+                            continue;
+                        }
+                        const contextInfo = rawContent?.extendedTextMessage?.contextInfo
+                            || msg.message?.extendedTextMessage?.contextInfo
+                            || rawContent?.contextInfo
+                            || msg.message?.contextInfo;
+                        const isAdOrAutoGreeting = Boolean(contextInfo?.externalAdReply ||
+                            contextInfo?.quotedAd ||
+                            contextInfo?.entryPointConversionApp ||
+                            contextInfo?.entryPointConversionSource ||
+                            contextInfo?.ctwaClid ||
+                            contextInfo?.ctwaSignals);
+                        // Check if the customer has ever sent a message across candidate JIDs
+                        const { candidateJids } = await resolveContactJids(jid, sock);
+                        const userHistory = await pool.query(`SELECT 1 FROM chat_history 
+                             WHERE jid IN (${candidateJids.map((_, i) => `$${i + 1}`).join(',')}) 
+                               AND role = 'user' 
+                             LIMIT 1`, candidateJids);
+                        const hasCustomerSpoken = userHistory.rows.length > 0;
+                        // If it has ad preview OR was sent before the customer ever sent a message, it is an automated greeting ("Salam otomatis")
+                        if (isAdOrAutoGreeting || !hasCustomerSpoken) {
+                            await saveMessage(jid, 'assistant', text || '[Media]', 'salam_otomatis', msg.key.id || undefined);
+                            appLogger.info({ component: 'whatsapp', jid, isAdOrAutoGreeting }, 'whatsapp.salam_otomatis_recorded');
+                        }
+                        else {
+                            // A human CS manually typed a reply to a customer who already chatted
+                            await saveMessage(jid, 'assistant', text || '[Media]', 'admin', msg.key.id || undefined);
+                            await markCustomerGreeted(jid, sock);
+                            appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.manual_cs_reply_recorded');
+                        }
+                    }
+                    continue;
+                }
+                if (!text && !hasMedia)
+                    continue;
+                // Resolve contact JIDs and real phone number
+                const { cleanPhone, phoneJid, lidJid, candidateJids } = await resolveContactJids(jid, sock);
+                const leadPhone = cleanPhone && !cleanPhone.includes('@') ? cleanPhone : (jid.endsWith('@s.whatsapp.net') ? jid.replace('@s.whatsapp.net', '') : undefined);
+                const pushName = msg.pushName || '';
+                // Track incoming unreplied message key (DO NOT mark as read yet, only when replied!)
+                if (msg.key?.id) {
+                    unrepliedMessageKeys.set(jid, msg.key);
+                    for (const cJid of candidateJids) {
+                        unrepliedMessageKeys.set(cJid, msg.key);
+                    }
+                }
+                // Sticky session assignment
+                if (runtimeSessionId !== 'legacy' && runtimeSessionId !== 'pending') {
+                    globalWhatsAppManager.setStickyAssignment(jid, runtimeSessionId);
+                }
+                // Check if customer quoted an earlier conversation message (not an automated ad greeting)
+                const contextInfo = rawContent?.extendedTextMessage?.contextInfo
+                    || msg.message?.extendedTextMessage?.contextInfo
+                    || rawContent?.contextInfo
+                    || msg.message?.contextInfo;
+                const isQuotedOldMessage = Boolean(contextInfo?.quotedMessage &&
+                    !contextInfo?.externalAdReply &&
+                    !contextInfo?.quotedAd &&
+                    !contextInfo?.entryPointConversionApp);
+                if (isQuotedOldMessage) {
+                    await recordExistingContact({
+                        jid,
+                        phone: leadPhone,
+                        lid: lidJid,
+                        source: 'quoted_old_chat'
+                    });
+                }
+                // Save lead & history with resolved real phone number
+                await upsertLead({ jid, phone: leadPhone, name: pushName || undefined });
+                await saveMessage(jid, 'user', text || '[Media]', 'customer', msg.key.id || undefined);
+                appLogger.info({ component: 'whatsapp', jid, phone: leadPhone, text: text.slice(0, 50), from: pushName }, 'whatsapp.message_received');
+                // Filter for auto-greeting: only recent messages (within 10 minutes)
+                const msgTimestamp = typeof msg.messageTimestamp === 'number'
+                    ? msg.messageTimestamp
+                    : Number(msg.messageTimestamp || 0);
+                const nowSec = Math.floor(Date.now() / 1000);
+                const isRecent = msgTimestamp > 0 ? (nowSec - msgTimestamp < 600) : true;
+                if (!isRecent) {
+                    appLogger.info({ component: 'whatsapp', jid, msgTimestamp, nowSec }, 'whatsapp.greeting_skipped_not_recent');
+                    continue;
+                }
+                // Check Sambutan Durian auto-greeting
+                // Kondisi:
+                // 1. Nomor baru yang baru chat dan belum pernah dibalas
+                // 2. Nomor baru yang baru chat + pesan salam otomatis (misal dari iklan Facebook / WA Business)
+                // Jika sudah ada riwayat percakapan sebelumnya / sudah pernah dibalas -> TIDAK dibalas
+                const botControl = await getBotRuntimeControl();
+                const bizConfig = getBusinessConfig();
+                if (botControl.enabled && bizConfig.enableGreeting && (bizConfig.welcomeMessage || bizConfig.offHoursMessage)) {
+                    const isAnyGreetingInProgress = candidateJids.some((cJid) => greetingInProgress.has(cJid));
+                    if (!isAnyGreetingInProgress) {
+                        for (const cJid of candidateJids)
+                            greetingInProgress.add(cJid);
+                        try {
+                            const shouldGreet = await shouldCustomerBeGreeted(jid, sock);
+                            if (shouldGreet) {
+                                let welcomeText = bizConfig.welcomeMessage;
+                                if (bizConfig.enableOffHoursGreeting && bizConfig.offHoursMessage) {
+                                    const isOffHours = isCurrentTimeWithinOffHours(bizConfig.offHoursStart || '21:00', bizConfig.offHoursEnd || '08:00');
+                                    if (isOffHours) {
+                                        welcomeText = bizConfig.offHoursMessage;
+                                    }
+                                }
+                                if (pushName) {
+                                    welcomeText = welcomeText.replace(/{{nama}}|{nama}|{{name}}|{name}/gi, pushName);
+                                }
+                                else {
+                                    welcomeText = welcomeText.replace(/{{nama}}|{nama}|{{name}}|{name}/gi, 'kak');
+                                }
+                                const delayMs = calculateRandomDelayMs(globalWhatsAppManager.getConfig());
+                                await perNumberOutboundQueue.enqueue(runtimeSessionId, delayMs, async () => {
+                                    try {
+                                        if (typeof sock.sendPresenceUpdate === 'function') {
+                                            await sock.sendPresenceUpdate('composing', jid);
+                                            await new Promise((r) => setTimeout(r, 1200));
+                                            await sock.sendPresenceUpdate('paused', jid);
+                                        }
+                                    }
+                                    catch { }
+                                    try {
+                                        const sent = await sock.sendMessage(jid, { text: welcomeText });
+                                        if (sent?.key?.id) {
+                                            sentBotMessageIds.add(sent.key.id);
+                                            if (sentBotMessageIds.size > 2000) {
+                                                const oldest = Array.from(sentBotMessageIds).slice(0, 500);
+                                                for (const id of oldest)
+                                                    sentBotMessageIds.delete(id);
+                                            }
+                                        }
+                                        await saveMessage(jid, 'assistant', welcomeText, 'bot', sent?.key?.id || undefined);
+                                        await markCustomerGreeted(jid, sock);
+                                        // Mark incoming customer message as read (centang biru 2) now that it is replied!
+                                        if (msg.key && typeof sock.readMessages === 'function') {
+                                            try {
+                                                await sock.readMessages([msg.key]);
+                                                unrepliedMessageKeys.delete(jid);
+                                                for (const cJid of candidateJids)
+                                                    unrepliedMessageKeys.delete(cJid);
+                                            }
+                                            catch { }
+                                        }
+                                        if (runtimeSessionId !== 'legacy' && runtimeSessionId !== 'pending') {
+                                            globalWhatsAppManager.recordMessageSent(runtimeSessionId);
+                                        }
+                                        appLogger.info({ component: 'whatsapp', jid, welcomeText: welcomeText.slice(0, 50) }, 'whatsapp.auto_greeting_sent');
+                                    }
+                                    finally {
+                                        setTimeout(() => {
+                                            for (const cJid of candidateJids)
+                                                greetingInProgress.delete(cJid);
+                                        }, 3000);
+                                    }
+                                });
+                            }
+                            else {
+                                for (const cJid of candidateJids)
+                                    greetingInProgress.delete(cJid);
+                                // DO NOT mark as greeted when skipped!
+                                appLogger.info({ component: 'whatsapp', jid }, 'whatsapp.greeting_skipped_conditions_not_met');
+                            }
+                        }
+                        catch (err) {
+                            for (const cJid of candidateJids)
+                                greetingInProgress.delete(cJid);
+                            appLogger.error({ component: 'whatsapp', jid, err }, 'whatsapp.auto_greeting_failed');
+                        }
+                    }
+                }
+            }
+        });
+        return sock;
+    }
+    finally {
+        startingSessions.delete(sessionId);
+    }
+};
+export const stopWhatsAppSession = async (sessionId, clearAuth = false) => {
+    const timer = reconnectTimers.get(sessionId);
+    if (timer) {
+        clearTimeout(timer);
+        reconnectTimers.delete(sessionId);
+    }
+    const runtimeSessionId = sessionAliases.get(sessionId) || sessionId;
+    const socket = activeSockets.get(runtimeSessionId) || activeSockets.get(sessionId);
+    activeSockets.delete(sessionId);
+    activeSockets.delete(runtimeSessionId);
+    if (socket) {
+        try {
+            socket.end(new Error('Session stopped by user'));
+        }
+        catch { }
+    }
+    removeWaSessionStatus(sessionId);
+    removeWaSessionStatus(runtimeSessionId);
+    if (clearAuth) {
+        await clearAuthState(runtimeSessionId);
+    }
+};
+export const stopWhatsAppConnection = async () => {
+    for (const id of activeSockets.keys()) {
+        await stopWhatsAppSession(id, false);
+    }
+};
+export const adoptPendingWhatsAppSession = async (phone, csLabel, csName, dailyLimit = 300) => {
+    const cleanPhone = phone.replace(/\D/g, '');
+    const pendingSocket = activeSockets.get('pending');
+    await renameAuthState('pending', cleanPhone);
+    sessionAliases.set('pending', cleanPhone);
+    if (pendingSocket) {
+        activeSockets.delete('pending');
+        activeSockets.set(cleanPhone, pendingSocket);
+        aliasAuthState('pending', cleanPhone);
+    }
+    globalWhatsAppManager.addSession(cleanPhone, csLabel, dailyLimit, csName);
+    globalWhatsAppManager.updateSession(cleanPhone, { status: 'online' });
+    setWaSessionStatus(cleanPhone, { state: 'open', detail: 'Terhubung', phone: cleanPhone });
+    removeWaSessionStatus('pending');
+    if (!pendingSocket) {
+        await startWhatsAppConnection(cleanPhone);
+    }
+    return true;
+};
+export const checkWhatsAppCredentialsExist = async () => {
+    try {
+        const checks = [
+            hasAuthState('legacy'),
+            ...globalWhatsAppManager.getSessions().map((s) => hasAuthState(s.phone)),
+        ];
+        return (await Promise.all(checks)).some(Boolean);
+    }
+    catch {
+        return false;
+    }
+};
+export const startConfiguredWhatsAppConnections = async () => {
+    const sessions = globalWhatsAppManager.getSessions();
+    if (!sessions.length) {
+        if (await hasAuthState('legacy')) {
+            await startWhatsAppConnection('legacy');
+        }
+        return;
+    }
+    const ready = [];
+    for (const session of sessions) {
+        if (await claimLegacyAuthState(session.phone) || await hasAuthState(session.phone)) {
+            ready.push(session.phone);
+        }
+    }
+    await Promise.allSettled(ready.map((phone) => startWhatsAppConnection(phone)));
+};

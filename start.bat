@@ -170,10 +170,23 @@ node scripts/patch-baileys.mjs >nul 2>&1
 echo.
 echo [5/6] Memeriksa status build aplikasi...
 
+set "CURRENT_COMMIT="
+if exist ".git" (
+    for /f "tokens=*" %%c in ('git rev-parse HEAD 2^>nul') do set "CURRENT_COMMIT=%%c"
+)
+
+set "LAST_BUILD_COMMIT="
+if exist ".last_build_commit" (
+    set /p LAST_BUILD_COMMIT=<.last_build_commit
+)
+
 set "NEED_BUILD=0"
 if not exist "dist\index.js" set "NEED_BUILD=1"
 if not exist "dist\admin-ui\index.html" set "NEED_BUILD=1"
 if "!UPDATE_PULLED!"=="1" set "NEED_BUILD=1"
+if defined CURRENT_COMMIT (
+    if not "!CURRENT_COMMIT!"=="!LAST_BUILD_COMMIT!" set "NEED_BUILD=1"
+)
 
 if "!NEED_BUILD!"=="1" (
     echo  Melakukan build aplikasi: TypeScript dan Vite Frontend...
@@ -183,9 +196,12 @@ if "!NEED_BUILD!"=="1" (
         pause
         exit /b !errorlevel!
     )
+    if defined CURRENT_COMMIT (
+        echo !CURRENT_COMMIT!> .last_build_commit
+    )
     echo  [OK] Build berhasil selesai!
 ) else (
-    echo  [OK] Aplikasi sudah siap: build dist tersedia.
+    echo  [OK] Aplikasi sudah siap: build dist tersedia dan paling terbaru.
 )
 
 :: -------------------------------------------------------------
